@@ -4239,6 +4239,7 @@ const App = {
 
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+                console.log('[DCM RAW] len=' + data.length + ' hasCR=' + (cleaned.indexOf('\r')>=0) + ' esc=' + (data.charCodeAt(0)===0x1b) + ' cleaned=' + JSON.stringify(cleaned));
                 const _buf = (add) => { this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + add; };
                 const _pop = () => { const b = this._termBuffers[sessionId] || ''; this._termBuffers[sessionId] = b.slice(0, -1); };
 
