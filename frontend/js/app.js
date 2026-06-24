@@ -1491,8 +1491,49 @@ const App = {
                     }).catch(() => {});
                 }
             });
+            // 🔧 高危命令实时监测：逐字符缓冲，回车前调用后端 API 分析风险
+            if (!this._termBuffers) this._termBuffers = {};
+            this._termBuffers[sessionId] = '';
+
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+
+                // ── Enter 键：检查缓冲命令行风险 ──
+                if (cleaned === '\r') {
+                    const cmd = (this._termBuffers[sessionId] || '').trim();
+                    this._termBuffers[sessionId] = '';
+                    if (cmd && this._isCommandPotentiallyRisky(cmd)) {
+                        this._checkTerminalRisk(sessionId, cmd);
+                        return; // 暂不发送 \r，等待用户确认
+                    }
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
+                    return;
+                }
+
+                // ── Ctrl+C：清空缓冲区 ──
+                if (cleaned === '\x03') {
+                    this._termBuffers[sessionId] = '';
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+                    return;
+                }
+
+                // ── 退格键：删除缓冲区最后一个字符 ──
+                if (cleaned === '\x7f' || cleaned === '\b') {
+                    const buf = this._termBuffers[sessionId] || '';
+                    this._termBuffers[sessionId] = buf.slice(0, -1);
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
+                    return;
+                }
+
+                // ── 可打印 ASCII 单字符：添加到缓冲区 ──
+                if (cleaned.length === 1) {
+                    const code = cleaned.charCodeAt(0);
+                    if (code >= 0x20 && code <= 0x7E) {
+                        this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + cleaned;
+                    }
+                }
+                // 其他控制字符 / 转义序列 / 粘贴：不修改缓冲区，直接发送
+
                 this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
             });
             term.onResize(s => {
@@ -1735,6 +1776,10 @@ const App = {
         // 🔧 清理该会话的悬浮模式状态
         if (typeof AIAssistant !== 'undefined' && AIAssistant._floatingMode) {
             AIAssistant._floatingMode[sessionId] = false;
+        }
+        // 🔧 清理终端输入缓冲区
+        if (this._termBuffers && this._termBuffers[sessionId]) {
+            delete this._termBuffers[sessionId];
         }
 
         // 如果是分屏主屏，先关闭分屏
@@ -3503,6 +3548,140 @@ const App = {
         this.openModal('securityConfirmModal');
     },
 
+    /**
+     * 🔧 快速本地命令风险预判（避免不必要的 API 调用）
+     * 匹配高危/中危命令关键字，命中则交由后端 API 做最终判定
+     */
+    _isCommandPotentiallyRisky(cmd) {
+        if (!cmd || cmd.length < 2) return false;
+        const patterns = [
+            /\brm\s+-r[fF]\b/,     /\bdd\s+if=/,            /\bmkfs\b/,
+            /\bmke2fs\b/,           /\bshutdown\b/,          /\breboot\b/,
+            /\bhalt\b/,             /\bpoweroff\b/,          /\bfdisk\b/,
+            /\bparted\b/,           /\bchmod\s+-R\s+777/,    /\bchown\s+-R/,
+            /\biptables\s+-[FX]/,   /\bkill\s+-9\b/,         /\binit\s+[06]\b/,
+            /\bpasswd\b/,           /\buserdel\b/,           /\bcrontab\s+-r\b/,
+            /\btruncate\s+-s\s+0/,  /\bwipefs\b/,           /\bmkswap\b/,
+            /'>'\s*\/dev\/sd/,       /\bcat\s+\/dev\/null\s*>\s*\/dev\/sd/,
+            /\bmv\s+\S+\s+\/dev\/null/,  /\bsystemctl\s+(stop|disable)/,
+        ];
+        return patterns.some(p => p.test(cmd));
+    },
+
+    /**
+     * 🔧 调用后端 API 进行命令风险分析
+     * critical → 直接阻止，发送 Ctrl+C 取消当前行
+     * high     → 弹出自定义安全确认弹窗
+     * medium   → Toast 提醒 + 放行
+     */
+    _checkTerminalRisk(sessionId, cmd) {
+        fetch('/api/ai/analyze-command', {
+            method: 'POST',
+            headers: this.authHeaders(),
+            body: JSON.stringify({ command: cmd })
+        })
+        .then(r => r.json())
+        .then(result => {
+            if (result.status !== 'ok' || !result.data || !result.data.risk) {
+                this._sendTerminalEnter(sessionId);
+                return;
+            }
+            const risk = result.data.risk;
+
+            if (risk.level === 'critical') {
+                this.toast('⛔ 极度危险命令已阻止: ' + risk.description, 'error', 8000);
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+                return;
+            }
+
+            if (risk.level === 'high') {
+                this._showTerminalRiskConfirm(sessionId, cmd, risk);
+                return;
+            }
+
+            if (risk.level === 'medium') {
+                this.toast('⚠️ 中危命令: ' + risk.description, 'warning', 5000);
+            }
+
+            this._sendTerminalEnter(sessionId);
+        })
+        .catch(() => {
+            // API 异常时放行，避免阻塞正常操作
+            this._sendTerminalEnter(sessionId);
+        });
+    },
+
+    /**
+     * 🔧 发送 Enter 键到后端 PTY
+     */
+    _sendTerminalEnter(sessionId) {
+        this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
+    },
+
+    /**
+     * 🔧 终端手打命令风险确认弹窗（与 _showSecurityConfirm 的区别：
+     *   这里只发送 \r，因为命令字符已在逐字键入时发送到 PTY）
+     */
+    _showTerminalRiskConfirm(sessionId, cmd, risk) {
+        const modal = document.getElementById('securityConfirmModal');
+        if (!modal) {
+            // 降级：浏览器原生确认
+            const msg = '⚠️ 高危命令:\n\n' + cmd + '\n\n风险: ' + risk.description + '\n建议: ' + risk.suggestion + '\n\n是否确认执行？';
+            if (confirm(msg)) {
+                this._sendTerminalEnter(sessionId);
+            } else {
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+            }
+            return;
+        }
+
+        // 填充弹窗数据
+        const badge = document.getElementById('secRiskBadge');
+        const label = document.getElementById('secRiskLabel');
+        badge.className = 'security-risk-badge ' + (risk.level || 'high');
+        label.textContent = (risk.level || 'high').toUpperCase();
+
+        document.getElementById('secCmdText').textContent = cmd || '';
+        document.getElementById('secDescription').textContent = risk.description || '-';
+        document.getElementById('secSuggestion').textContent = risk.suggestion || '请仔细核对命令后再执行';
+
+        // 绑定按钮事件
+        const confirmBtn = document.getElementById('secConfirmBtn');
+        const cancelBtn  = document.getElementById('secCancelBtn');
+        const overlayEl  = modal.querySelector('.modal-overlay');
+
+        const cleanup = () => {
+            confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+            cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+            overlayEl.replaceWith(overlayEl.cloneNode(true));
+            this.closeModal('securityConfirmModal');
+            if (this._secConfirmTimer) {
+                clearTimeout(this._secConfirmTimer);
+                this._secConfirmTimer = null;
+            }
+        };
+
+        document.getElementById('secConfirmBtn').addEventListener('click', () => {
+            cleanup();
+            this._sendTerminalEnter(sessionId);
+            this.toast('✅ 命令已确认并发送', 'success');
+        });
+
+        document.getElementById('secCancelBtn').addEventListener('click', () => {
+            cleanup();
+            this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+            this.toast('❌ 命令已取消', 'info');
+        });
+
+        // 60 秒超时自动取消
+        this._secConfirmTimer = setTimeout(() => {
+            cleanup();
+            this.toast('⏰ 确认超时，请重新输入命令', 'warning');
+        }, 60000);
+
+        this.openModal('securityConfirmModal');
+    },
+
     // ══════════════════════════════
     //  Toast 通知 + 通知中心
     // ══════════════════════════════
@@ -4059,8 +4238,48 @@ const App = {
                     }).catch(() => {});
                 }
             });
+            // 🔧 高危命令实时监测：逐字符缓冲，回车前调用后端 API 分析风险
+            if (!this._termBuffers) this._termBuffers = {};
+            this._termBuffers[sessionId] = '';
+
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+
+                // ── Enter 键：检查缓冲命令行风险 ──
+                if (cleaned === '\r') {
+                    const cmd = (this._termBuffers[sessionId] || '').trim();
+                    this._termBuffers[sessionId] = '';
+                    if (cmd && this._isCommandPotentiallyRisky(cmd)) {
+                        this._checkTerminalRisk(sessionId, cmd);
+                        return;
+                    }
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
+                    return;
+                }
+
+                // ── Ctrl+C：清空缓冲区 ──
+                if (cleaned === '\x03') {
+                    this._termBuffers[sessionId] = '';
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+                    return;
+                }
+
+                // ── 退格键 ──
+                if (cleaned === '\x7f' || cleaned === '\b') {
+                    const buf = this._termBuffers[sessionId] || '';
+                    this._termBuffers[sessionId] = buf.slice(0, -1);
+                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
+                    return;
+                }
+
+                // ── 可打印 ASCII 单字符 ──
+                if (cleaned.length === 1) {
+                    const code = cleaned.charCodeAt(0);
+                    if (code >= 0x20 && code <= 0x7E) {
+                        this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + cleaned;
+                    }
+                }
+
                 this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
             });
             term.onResize(s => {
