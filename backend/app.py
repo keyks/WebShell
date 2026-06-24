@@ -2405,6 +2405,34 @@ def _extract_commands(text: str) -> list:
             cmds.append(m)
     return list(dict.fromkeys(cmds))   # 去重保序
 
+def _sanitize_ai_reply(text: str) -> str:
+    """后处理：清理 AI 回复中的元信息、重复命令块"""
+    import re as _re
+    if not text:
+        return text
+
+    # 1. 去除「当前对话轮数：N」（中英文冒号均支持）
+    text = _re.sub(r'\n?\s*当前对话轮数[：:]\s*\d+\s*$', '', text)
+
+    # 2. 去除「当前对话轮数：N」在多行中间的情况
+    text = _re.sub(r'\n当前对话轮数[：:]\s*\d+\n', '\n', text)
+
+    # 3. 去除连续完全相同的命令行（如连着三行 rm ~/nul）
+    lines = text.split('\n')
+    deduped = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and deduped and deduped[-1].strip() == stripped:
+            continue  # 跳过与上一行完全相同的行
+        deduped.append(line)
+    text = '\n'.join(deduped)
+
+    # 4. 去除末尾空行
+    text = text.rstrip() + '\n'
+
+    return text
+
+
 # ────────────────────────────────────────
 # 模块一：多轮对话
 # ────────────────────────────────────────
@@ -2455,19 +2483,28 @@ def api_ai_chat():
         f'你是一个资深 SRE 运维专家助手，集成在 WebTerminal 运维平台中。\n'
         f'{"当前服务器状态：" + sys_context if sys_context else "（当前无活跃 SSH 连接）"}\n'
         f'\n'
-        f'能力：\n'
-        f'1. 理解运维意图（诊断/操作/查询/解释）\n'
-        f'2. 将自然语言转化为具体的 Linux 命令\n'
-        f'3. 对高危操作进行风险提示\n'
-        f'4. 通过多轮对话引导用户逐步排查问题\n'
+        f'核心职责：\n'
+        f'1. 理解用户意图（诊断/操作/查询/解释）\n'
+        f'2. 将自然语言翻译为准确的 Linux 命令\n'
+        f'3. 对高危操作（rm -rf/格式化/改权限等）必须风险提示\n'
+        f'4. 引导用户逐步排查，每次只给 1-2 条最合适的命令\n'
+        f'\n'
+        f'行为准则（必须遵守）：\n'
+        f'- 仔细阅读用户粘贴的命令输出，据此判断问题，不要凭空猜测\n'
+        f'- 如果用户执行了命令但无效，说明之前的建议有误，必须换个思路，绝不要重复建议同一条命令\n'
+        f'- 不要混淆文件名与系统路径：用户说的 "nul" 只是一个普通文件名，不是 /dev/null 设备\n'
+        f'- 一条命令绝不能在回复中出现超过一次\n'
+        f'- 当不确定时，诚实告诉用户并建议排查步骤，不要编造\n'
+        f'- 不要在回复末尾追加任何元信息（如对话轮数、时间戳等）\n'
         f'\n'
         f'回复格式：\n'
-        f'- 使用中文回复，保持简洁专业\n'
-        f'- 如需执行命令，末尾用以下格式列出：\n'
+        f'- 用中文回复，简洁专业，字数控制在 200 字以内\n'
+        f'- 先给分析和建议，再给命令\n'
+        f'- 命令放在末尾的代码块中：\n'
         f'```commands\n'
-        f'命令1\n'
-        f'命令2\n'
-        f'高危操作在命令前加 ⚠️ 标记'
+        f'单条命令\n'
+        f'```\n'
+        f'- 高危命令前加 ⚠️ 标记'
     )
 
     messages = [{'role': 'system', 'content': system_prompt}]
@@ -2492,6 +2529,9 @@ def api_ai_chat():
         if not isinstance(reply, str):
             log.error(f'[AI Chat] 回复格式异常，期望 str，实际 {type(reply).__name__}')
             reply = str(reply) if reply is not None else '（AI 无响应）'
+
+        # 🔧 后处理：清理 AI 回复中的元信息和重复内容
+        reply = _sanitize_ai_reply(reply)
 
         conversation_manager.add_message(chat_id, 'assistant', reply)
 
