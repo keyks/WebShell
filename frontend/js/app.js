@@ -1502,9 +1502,12 @@ const App = {
                 if (cleaned === '\r') {
                     const cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
+                    console.log('[DCM TRACE] retrySession Enter | cmd="' + cmd + '" len=' + cmd.length);
                     if (this._checkDangerousCmd(sessionId, cmd)) {
+                        console.log('[DCM TRACE] retrySession → 已拦截');
                         return; // 命令被拦截（critical 阻止 / high 弹窗确认中）
                     }
+                    console.log('[DCM TRACE] retrySession → 放行');
                     this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
                     return;
                 }
@@ -3590,11 +3593,16 @@ const App = {
      * @returns {boolean} true=命令已被拦截，false=安全可执行
      */
     _checkDangerousCmd(sessionId, cmd) {
-        if (!cmd || cmd.length < 2) return false;
+        if (!cmd || cmd.length < 2) {
+            console.log('[DCM TRACE] _checkDangerousCmd → false (cmd too short)');
+            return false;
+        }
 
         // ── 路径 1：DangerousCommandManager 可用 → 完整检测 ──
         if (typeof DangerousCommandManager !== 'undefined') {
-            return DangerousCommandManager.checkAndBlock(sessionId, cmd);
+            const result = DangerousCommandManager.checkAndBlock(sessionId, cmd);
+            console.log('[DCM TRACE] DCM.checkAndBlock("' + cmd + '") → ' + result);
+            return result;
         }
 
         // ── 路径 2：内联正则降级（DangerousCommandManager 未加载）──
@@ -4218,9 +4226,12 @@ const App = {
                 if (cleaned === '\r') {
                     const cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
+                    console.log('[DCM TRACE] createSessionUI Enter | cmd="' + cmd + '" len=' + cmd.length);
                     if (this._checkDangerousCmd(sessionId, cmd)) {
+                        console.log('[DCM TRACE] createSessionUI → 已拦截');
                         return; // 命令被拦截（critical 阻止 / high 弹窗确认中）
                     }
+                    console.log('[DCM TRACE] createSessionUI → 放行');
                     this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
                     return;
                 }
