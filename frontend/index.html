@@ -28,6 +28,8 @@
             <div class="logo">
                 <i class="fas fa-terminal"></i>
                 <span class="toolbar-label">WebTerminal</span>
+                <span id="dcmVerTag" style="font-size:9px;background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.6);
+                    padding:1px 5px;border-radius:3px;margin-left:4px;letter-spacing:0.5px;">v302</span>
             </div>
             <button class="btn btn-primary btn-sm" onclick="App.showQuickConnect()" title="快速连接">
                 <i class="fas fa-bolt"></i> <span class="toolbar-label">快速连接</span>
@@ -872,44 +874,65 @@
 <!-- Toast 通知 -->
 <div class="toast-container" id="toastContainer"></div>
 
-<script src="js/terminal.js?v=301"></script>
-<script src="js/filemanager.js?v=301"></script>
-<script src="js/monitor.js?v=301"></script>
-<script src="js/commands.js?v=301"></script>
-<script src="js/dangerous_commands.js?v=301"></script>
-<script src="js/alerts.js?v=301"></script>
-<script src="js/cluster.js?v=301"></script>
-<script src="js/app.js?v=301"></script>
-<script src="/js/ai_assistant.js?v=301"></script>
+<script src="js/terminal.js?v=302"></script>
+<script src="js/filemanager.js?v=302"></script>
+<script src="js/monitor.js?v=302"></script>
+<script src="js/commands.js?v=302"></script>
+<script src="js/dangerous_commands.js?v=302"></script>
+<script src="js/alerts.js?v=302"></script>
+<script src="js/cluster.js?v=302"></script>
+<script src="js/app.js?v=302"></script>
+<script src="/js/ai_assistant.js?v=302"></script>
 
 <!-- 🔧 DCM v2 加载自检：页面加载后自动验证 -->
 <script>
 (function(){
+    var MAX_WAIT = 5000; // 最多等 5 秒
+    var started = Date.now();
     var check = function() {
         var DCM = window.DangerousCommandManager;
-        if (!DCM) { setTimeout(check, 200); return; }
-        // 自检：用 rm -r test 测试规则匹配
-        var rule = DCM.getMatchedRule('rm -r hh');
-        var ok = rule && rule.level === 'high';
-        var bg = ok ? '#00b894' : '#e74c3c';
-        var txt = ok ? '✅ 规则引擎 v2 正常 (rm -r hh → HIGH)' : '❌ 规则引擎异常！';
+        if (!DCM) {
+            if (Date.now() - started < MAX_WAIT) { setTimeout(check, 200); return; }
+            // 超时：DCM 永未加载 → 显示红色持久横幅
+            showBanner(false, 'DCM 模块未加载! 使用内联正则降级', true);
+            console.error('❌ DangerousCommandManager 超时未加载，已启用内联正则降级');
+            return;
+        }
+        // 双测试：rm -r hh 和 rm -rf hh
+        var r1 = DCM.getMatchedRule('rm -r hh');
+        var r2 = DCM.getMatchedRule('rm -rf hh');
+        var ok = r1 && r1.level === 'high' && r2 && r2.level === 'high';
+        var txt = ok
+            ? '✅ DCM v2 正常 (rm -r/rm -rf → HIGH)'
+            : '❌ DCM 规则缺失! (r1:' + JSON.stringify(r1) + ' r2:' + JSON.stringify(r2) + ')';
+        showBanner(ok, txt, !ok);
+        console.log(txt);
+    };
+    function showBanner(ok, txt, stay) {
         var div = document.createElement('div');
         div.id = '_dcm_v2_check';
+        var bg = ok ? '#00b894' : '#e74c3c';
         div.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);'
-            + 'z-index:99999;padding:6px 18px;font-size:12px;font-weight:700;'
-            + 'color:#fff;background:'+bg+';border-radius:0 0 8px 8px;'
-            + 'box-shadow:0 2px 8px rgba(0,0,0,0.3);pointer-events:none;'
-            + 'transition:opacity 0.3s;';
+            + 'z-index:99999;padding:8px 20px;font-size:13px;font-weight:700;'
+            + 'color:#fff;background:'+bg+';border-radius:0 0 10px 10px;'
+            + 'box-shadow:0 2px 12px rgba(0,0,0,0.4);'
+            + 'transition:opacity 0.4s;cursor:default;';
         div.textContent = txt;
         document.body.appendChild(div);
-        setTimeout(function(){ div.style.opacity = '0'; }, 4000);
-        setTimeout(function(){ div && div.remove(); }, 4500);
-        console.log(txt + ' | 规则命中: ' + JSON.stringify(rule));
+        if (!stay) {
+            setTimeout(function(){ div.style.opacity = '0'; }, 6000);
+            setTimeout(function(){ div && div.remove(); }, 6500);
+        } else {
+            // 错误永久显示，点击可关闭
+            div.style.cursor = 'pointer';
+            div.title = '点击关闭';
+            div.onclick = function(){ div.remove(); };
+        }
     };
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function(){ setTimeout(check, 500); });
+        document.addEventListener('DOMContentLoaded', function(){ setTimeout(check, 700); });
     } else {
-        setTimeout(check, 500);
+        setTimeout(check, 700);
     }
 })();
 </script>

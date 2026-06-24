@@ -1498,11 +1498,11 @@ const App = {
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
 
-                // ── Enter 键：本地规则引擎检测风险（纯同步，无 API 依赖）──
+                // ── Enter 键：命令风险检测（DCM + 内联降级双保险）──
                 if (cleaned === '\r') {
                     const cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
-                    if (cmd && DangerousCommandManager.checkAndBlock(sessionId, cmd)) {
+                    if (this._checkDangerousCmd(sessionId, cmd)) {
                         return; // 命令被拦截（critical 阻止 / high 弹窗确认中）
                     }
                     this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
@@ -3578,6 +3578,88 @@ const App = {
         DangerousCommandManager.checkAndBlock(sessionId, cmd);
     },
 
+    /**
+     * 🔧🔧 终极兜底：命令危险检测（内联正则，不依赖任何外部模块）
+     *
+     * 优先级：
+     *   1. DangerousCommandManager（完整版：三级分类 + 安全确认弹窗）
+     *   2. 内联正则降级（浏览器 confirm 弹窗）
+     *
+     * @param {string} sessionId
+     * @param {string} cmd
+     * @returns {boolean} true=命令已被拦截，false=安全可执行
+     */
+    _checkDangerousCmd(sessionId, cmd) {
+        if (!cmd || cmd.length < 2) return false;
+
+        // ── 路径 1：DangerousCommandManager 可用 → 完整检测 ──
+        if (typeof DangerousCommandManager !== 'undefined') {
+            return DangerousCommandManager.checkAndBlock(sessionId, cmd);
+        }
+
+        // ── 路径 2：内联正则降级（DangerousCommandManager 未加载）──
+        // 仅在 DCM 不可用时启用（如文件加载失败或浏览器缓存了旧版）
+        // 覆盖最常见的高危命令，使用浏览器原生 confirm 弹窗
+        console.warn('[DCM 降级] DangerousCommandManager 未定义，启用内联正则兜底');
+
+        const patterns = [
+            // CRITICAL — 直接阻止
+            { re: /\brm\s+-rf\s+\//,    lvl: 'BLOCK', desc: '递归强制删除根目录' },
+            { re: /\brm\s+-rf\s+\/\*/,   lvl: 'BLOCK', desc: '删除根目录所有内容' },
+            { re: /\dd\s+if=\/dev\/(zero|random|urandom)/, lvl: 'BLOCK', desc: '磁盘清零/随机写入' },
+            { re: /\bmkfs\b/,            lvl: 'BLOCK', desc: '格式化文件系统' },
+            { re: /:\(\)\{.*\}.*:/,      lvl: 'BLOCK', desc: 'Fork 炸弹' },
+            // HIGH — 弹窗确认
+            { re: /\brm\s+-[rR][fF]?\s+/, lvl: 'CONFIRM', desc: '危险删除操作' },
+            { re: /\brm\s+-f\s+/,       lvl: 'CONFIRM', desc: '强制删除' },
+            { re: /\bshred\b/,           lvl: 'CONFIRM', desc: '安全粉碎文件' },
+            { re: /\bchmod\s+-R\s+777/,  lvl: 'CONFIRM', desc: '递归授予777权限' },
+            { re: /\bchown\s+-R\s+\S+\s+\//, lvl: 'CONFIRM', desc: '递归修改根目录所有者' },
+            { re: /\bfdisk\b/,           lvl: 'CONFIRM', desc: '磁盘分区操作' },
+            { re: /\bparted\b/,          lvl: 'CONFIRM', desc: '磁盘分区操作' },
+            { re: /\bshutdown\b/,        lvl: 'CONFIRM', desc: '关机操作' },
+            { re: /\breboot\b/,          lvl: 'CONFIRM', desc: '重启操作' },
+            { re: /\bpoweroff\b/,        lvl: 'CONFIRM', desc: '关机操作' },
+            { re: /\bhalt\b/,            lvl: 'CONFIRM', desc: '停机操作' },
+            { re: /\binit\s+[06]\b/,     lvl: 'CONFIRM', desc: '切换运行级别' },
+            { re: /\biptables\s+-F/,     lvl: 'CONFIRM', desc: '清空防火墙规则' },
+            { re: /\bdd\s+if=/,          lvl: 'CONFIRM', desc: '磁盘写入操作' },
+        ];
+
+        let matched = null;
+        for (const p of patterns) {
+            if (p.re.test(cmd)) { matched = p; break; }
+        }
+        if (!matched) return false;
+
+        if (matched.lvl === 'BLOCK') {
+            this.toast('⛔ 极度危险命令已阻止: ' + matched.desc, 'error', 8000);
+            // 发送 Ctrl+C 取消当前行
+            if (this.socket) {
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+            }
+            return true;
+        }
+
+        // CONFIRM — 浏览器原生确认弹窗
+        const msg = '⚠️ 高危命令检测 (降级模式)\n\n' +
+            '命令: ' + cmd + '\n' +
+            '风险: ' + matched.desc + '\n\n' +
+            '是否确认执行？';
+        if (confirm(msg)) {
+            if (this.socket) {
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
+            }
+            this.toast('✅ 命令已确认并发送', 'success');
+        } else {
+            if (this.socket) {
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+            }
+            this.toast('❌ 命令已取消', 'info');
+        }
+        return true;
+    },
+
     // ══════════════════════════════
     //  Toast 通知 + 通知中心
     // ══════════════════════════════
@@ -4141,11 +4223,11 @@ const App = {
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
 
-                // ── Enter 键：本地规则引擎检测风险（纯同步，无 API 依赖）──
+                // ── Enter 键：命令风险检测（DCM + 内联降级双保险）──
                 if (cleaned === '\r') {
                     const cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
-                    if (cmd && DangerousCommandManager.checkAndBlock(sessionId, cmd)) {
+                    if (this._checkDangerousCmd(sessionId, cmd)) {
                         return; // 命令被拦截（critical 阻止 / high 弹窗确认中）
                     }
                     this.socket.emit('terminal_input', { session_id: sessionId, data: '\r' });
