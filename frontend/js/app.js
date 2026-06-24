@@ -1518,18 +1518,29 @@ const App = {
                         else if (code >= 0x20 && code <= 0x7E) _buf(ch);
                     }
 
-                    const cmd = (this._termBuffers[sessionId] || '').trim();
+                    let cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
-                    console.log('[DCM TRACE] retrySession Enter | cmd="' + cmd + '" len=' + cmd.length);
+
+                    // 🔧 修复：箭头键历史导航不会键入字符，缓冲区可能为空
+                    // 尝试从 xterm 可视缓冲区读取当前行（含 prompt 前缀，但正则仍能匹配）
+                    if (!cmd && term.buffer) {
+                        try {
+                            const buf = term.buffer.active;
+                            const line = buf.getLine(buf.baseY + buf.cursorY);
+                            if (line) {
+                                const visualCmd = line.translateToString(true).trim();
+                                if (visualCmd) cmd = visualCmd;
+                            }
+                        } catch(e) {}
+                    }
+
                     if (this._checkDangerousCmd(sessionId, cmd)) {
-                        console.log('[DCM TRACE] retrySession → 已拦截');
                         for (let i = 0; i < after.length; i++) {
                             const ch = after[i], code = ch.charCodeAt(0);
                             if (code >= 0x20 && code <= 0x7E) _buf(ch);
                         }
                         return;
                     }
-                    console.log('[DCM TRACE] retrySession → 放行');
                     this.socket.emit('terminal_input', { session_id: sessionId, data: before + '\r' + after });
                     return;
                 }
@@ -3495,6 +3506,78 @@ const App = {
         }
     },
 
+    /** 安全确认弹窗开关（.visible class + CSS transform 居中 + 动画重置） */
+    openSecurityConfirm() {
+        const backdrop = document.getElementById('securityConfirmBackdrop');
+        const modal    = document.getElementById('securityConfirmModal');
+
+        if (backdrop) {
+            backdrop.style.display = 'block';
+            backdrop.classList.add('visible');
+        }
+        if (modal) {
+            modal.style.display = 'flex';
+            modal.classList.add('visible');
+            // 清除内联 left/top（防止覆盖 CSS transform）
+            modal.style.left = '';
+            modal.style.top = '';
+            // 重置动画：强制回流后重新播放入场动画
+            modal.style.animation = 'none';
+            void modal.offsetWidth;
+            modal.style.animation = '';
+        }
+
+        document.body.classList.add('modal-open');
+
+        // ESC 键关闭
+        this._secEscHandler = (e) => {
+            if (e.key === 'Escape') this.closeSecurityConfirm();
+        };
+        document.addEventListener('keydown', this._secEscHandler);
+    },
+    closeSecurityConfirm() {
+        const backdrop = document.getElementById('securityConfirmBackdrop');
+        const modal    = document.getElementById('securityConfirmModal');
+
+        if (this._secEscHandler) {
+            document.removeEventListener('keydown', this._secEscHandler);
+            this._secEscHandler = null;
+        }
+
+        if (backdrop) {
+            backdrop.style.display = 'none';
+            backdrop.classList.remove('visible');
+        }
+        if (modal) {
+            modal.style.display = 'none';
+            modal.classList.remove('visible');
+            modal.style.left = '';
+            modal.style.top = '';
+        }
+
+        document.body.classList.remove('modal-open');
+    },
+
+    /** CSS transform 已完美居中；此方法仅做极端小屏边界保护 */
+    repositionSecurityConfirm() {
+        const modal = document.getElementById('securityConfirmModal');
+        if (!modal) return;
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        if (vw < 400) {
+            modal.style.maxWidth = '94vw';
+        } else {
+            modal.style.maxWidth = '';
+        }
+        if (vh < 500) {
+            modal.style.maxHeight = '88vh';
+        } else {
+            modal.style.maxHeight = '';
+        }
+    },
+
     confirm(message, onOk, onCancel) {
         document.getElementById('confirmMessage').innerHTML = message;
         const btn    = document.getElementById('confirmBtn');
@@ -3519,35 +3602,108 @@ const App = {
         const modal = document.getElementById('securityConfirmModal');
         if (!modal) return;
 
-        // 填充数据
+        const lv = opts.risk_level || 'high';
+        const cmd = opts.command || '';
+
+        // ── 填充数据 ──
         const badge = document.getElementById('secRiskBadge');
         const label = document.getElementById('secRiskLabel');
-        badge.className = 'security-risk-badge ' + (opts.risk_level || 'high');
-        label.textContent = (opts.risk_level || 'high').toUpperCase();
+        if (badge && label) {
+            const icons = { critical:'fa-biohazard', high:'fa-shield-virus', medium:'fa-exclamation-triangle' };
+            const names = { critical:'严重威胁',  high:'高危操作',       medium:'中危提醒' };
+            badge.className = 'sec-badge ' + lv;
+            badge.querySelector('i').className = 'fas ' + (icons[lv] || icons.high);
+            label.textContent = (names[lv] || names.high);
+        }
 
-        document.getElementById('secCmdText').textContent = opts.command || '';
+        const catEl = document.getElementById('secCategory');
+        if (catEl) catEl.textContent = opts.description ? this._guessRiskCategory(opts.description) : '';
+
+        document.getElementById('secCmdText').textContent = cmd;
         document.getElementById('secDescription').textContent = opts.description || '-';
         document.getElementById('secSuggestion').textContent = opts.suggestion || '请仔细核对命令后再执行';
 
-        // 绑定确认按钮（一次性）
-        const confirmBtn = document.getElementById('secConfirmBtn');
-        const cancelBtn  = document.getElementById('secCancelBtn');
-        const overlay    = modal.querySelector('.modal-overlay');
+        // 影响分析
+        const dmgGrid = document.getElementById('secDmgGrid');
+        if (dmgGrid) {
+            const dimensions = [
+                { id: 'data_loss',    icon: 'fa-database',     label: '数据丢失' },
+                { id: 'permission',   icon: 'fa-key',          label: '权限变更' },
+                { id: 'sys_crash',    icon: 'fa-power-off',    label: '系统崩溃/中断' },
+                { id: 'svc_stop',     icon: 'fa-server',       label: '服务停止' },
+                { id: 'disk_destroy', icon: 'fa-hdd',          label: '磁盘/分区损坏' },
+                { id: 'sec_breach',   icon: 'fa-user-secret',  label: '安全漏洞' },
+            ];
+            const hits = this._analyzeRiskImpact(cmd);
+            dmgGrid.innerHTML = dimensions.map(dim => {
+                const hit = hits.indexOf(dim.id) >= 0;
+                return '<div class="sec-dmg-item ' + (hit ? 'active' : 'inactive') + '">' +
+                    '<i class="fas ' + dim.icon + ' sec-dmg-icon"></i>' +
+                    '<span>' + dim.label + '</span></div>';
+            }).join('');
+        }
 
-        const cleanup = () => {
-            confirmBtn.replaceWith(confirmBtn.cloneNode(true));
-            cancelBtn.replaceWith(cancelBtn.cloneNode(true));
-            overlay.replaceWith(overlay.cloneNode(true));
-            this.closeModal('securityConfirmModal');
+        const hdSub = document.getElementById('secHdSub');
+        if (hdSub) hdSub.textContent = (lv === 'critical')
+            ? '⚠ 此操作可能造成不可逆的严重损害，请谨慎决策'
+            : '系统已拦截该命令，需二次确认后方可执行';
+
+        // ── 倒计时 ──
+        const CD_SEC = lv === 'critical' ? 5 : 3;
+        const cdBar = document.getElementById('secCdFill');
+        const cdNum = document.getElementById('secCdNum');
+        const cdText = document.getElementById('secCdText');
+        const confirmBtn = document.getElementById('secConfirmBtn');
+        const confirmLabel = document.getElementById('secConfirmLabel');
+        let cdTimer = null, cdLeft = CD_SEC, cdDone = false;
+
+        if (confirmBtn && confirmLabel) {
+            confirmBtn.disabled = true;
+            confirmLabel.textContent = '我了解风险，执行命令';
+        }
+        const updateCdUI = (left) => {
+            if (cdBar) cdBar.style.width = (left / CD_SEC * 100) + '%';
+            if (cdNum) cdNum.textContent = String(left);
+            if (cdText) cdText.innerHTML = '请等待 <strong id="secCdNum">' + left + '</strong> 秒后再确认';
+        };
+        updateCdUI(CD_SEC);
+
+        const startCd = () => {
+            cdTimer = setInterval(() => {
+                cdLeft--;
+                updateCdUI(Math.max(cdLeft, 0));
+                if (cdLeft <= 0) {
+                    clearInterval(cdTimer);
+                    cdDone = true;
+                    if (cdBar) cdBar.style.width = '0%';
+                    if (cdText) cdText.innerHTML = '<i class="fas fa-check-circle" style="color:#4caf50;"></i> 请再次确认后点击执行';
+                    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.focus(); }
+                }
+            }, 1000);
         };
 
+        // ── 绑定事件 ──
+        const cancelBtn = document.getElementById('secCancelBtn');
+        const backdrop  = document.getElementById('securityConfirmBackdrop');
+
+        const cleanup = () => {
+            if (cdTimer) clearInterval(cdTimer);
+            if (this._secConfirmTimer) { clearTimeout(this._secConfirmTimer); this._secConfirmTimer = null; }
+            if (confirmBtn) confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+            if (cancelBtn) cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+            if (backdrop) backdrop.replaceWith(backdrop.cloneNode(true));
+            this.closeSecurityConfirm();
+        };
+
+        // ── 打开弹窗（CSS transform 居中，无需 JS 定位）──
+        this.openSecurityConfirm();
+
         document.getElementById('secConfirmBtn').addEventListener('click', () => {
+            if (!cdDone) return;
             cleanup();
-            // 重新发送命令到终端，携带后端签发的确认 token
-            // 🔧 使用 \r（CR）而非 \n，与终端 onData 的换行格式一致
             this.socket.emit('terminal_input', {
                 session_id: opts.session_id,
-                data: opts.command + '\r',
+                data: cmd + '\r',
                 _risk_confirmed: true,
                 _confirm_token: opts.confirm_token || ''
             });
@@ -3559,13 +3715,46 @@ const App = {
             this.toast('❌ 命令已取消', 'info');
         });
 
-        // 60 秒超时自动关闭（与后端 token 过期时间一致）
+        // 点击遮罩关闭
+        if (backdrop) {
+            backdrop.addEventListener('click', () => {
+                cleanup();
+                this.toast('❌ 命令已取消', 'info');
+            });
+        }
+
         this._secConfirmTimer = setTimeout(() => {
             cleanup();
             this.toast('⏰ 确认超时，请重新执行命令', 'warning');
         }, 60000);
 
-        this.openModal('securityConfirmModal');
+        setTimeout(startCd, 200);
+    },
+
+    /** 安全确认弹窗辅助：根据风险描述猜测操作类别 */
+    _guessRiskCategory(desc) {
+        const keys = {
+            '删除': '文件与目录操作', '格式化': '磁盘/文件系统操作', '清空': '数据销毁',
+            '修改': '权限与所有者变更', '关机': '电源与系统控制', '重启': '电源与系统控制',
+            '停机': '电源与系统控制', '分区': '磁盘管理', '防火墙': '网络安全',
+            '杀死': '进程管理', '粉碎': '数据销毁', '写入': '磁盘写入',
+            '覆盖': '数据销毁', '关停': '电源与系统控制',
+        };
+        for (const k in keys) { if (desc.indexOf(k) >= 0) return keys[k]; }
+        return '系统命令';
+    },
+
+    /** 安全确认弹窗辅助：分析命令涉及的潜在影响维度 */
+    _analyzeRiskImpact(cmd) {
+        const hits = [];
+        if (/\brm\b|shred|unlink|truncate|wipefs/.test(cmd))                        hits.push('data_loss');
+        if (/\bmkfs\b|mke2fs|fdisk|parted|dd\s+if=.*\/dev\//.test(cmd) ||
+            />\s*\/dev\/sd/.test(cmd))                                               hits.push('disk_destroy');
+        if (/\bchmod\s+-R\s+777|chmod\s+777\b|chown\s+-R/.test(cmd))               hits.push('permission');
+        if (/\bshutdown\b|reboot|halt|poweroff|init\s+[06]|kill\s+-9\b/.test(cmd)) hits.push('sys_crash');
+        if (/\bsystemctl\s+(stop|disable)\b/.test(cmd))                              hits.push('svc_stop');
+        if (/\biptables\s+-F|iptables\s+-X/.test(cmd))                               hits.push('sec_breach');
+        return hits.length ? hits : ['data_loss'];
     },
 
     /**
@@ -3612,15 +3801,12 @@ const App = {
      */
     _checkDangerousCmd(sessionId, cmd) {
         if (!cmd || cmd.length < 2) {
-            console.log('[DCM TRACE] _checkDangerousCmd → false (cmd too short)');
             return false;
         }
 
         // ── 路径 1：DangerousCommandManager 可用 → 完整检测 ──
         if (typeof DangerousCommandManager !== 'undefined') {
-            const result = DangerousCommandManager.checkAndBlock(sessionId, cmd);
-            console.log('[DCM TRACE] DCM.checkAndBlock("' + cmd + '") → ' + result);
-            return result;
+            return DangerousCommandManager.checkAndBlock(sessionId, cmd);
         }
 
         // ── 路径 2：内联正则降级（DangerousCommandManager 未加载）──
@@ -4239,7 +4425,6 @@ const App = {
 
             term.onData(data => {
                 const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
-                console.log('[DCM RAW] len=' + data.length + ' hasCR=' + (cleaned.indexOf('\r')>=0) + ' esc=' + (data.charCodeAt(0)===0x1b) + ' cleaned=' + JSON.stringify(cleaned));
                 const _buf = (add) => { this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + add; };
                 const _pop = () => { const b = this._termBuffers[sessionId] || ''; this._termBuffers[sessionId] = b.slice(0, -1); };
 
@@ -4262,11 +4447,24 @@ const App = {
                         else if (code >= 0x20 && code <= 0x7E) _buf(ch);
                     }
 
-                    const cmd = (this._termBuffers[sessionId] || '').trim();
+                    let cmd = (this._termBuffers[sessionId] || '').trim();
                     this._termBuffers[sessionId] = '';
-                    console.log('[DCM TRACE] createSessionUI Enter | cmd="' + cmd + '" len=' + cmd.length);
+
+                    // 🔧 修复：箭头键历史导航不会键入字符，缓冲区可能为空
+                    // 尝试从 xterm 可视缓冲区读取当前行（含 prompt 前缀，但正则仍能匹配）
+                    if (!cmd && term.buffer) {
+                        try {
+                            const buf = term.buffer.active;
+                            const line = buf.getLine(buf.baseY + buf.cursorY);
+                            if (line) {
+                                const visualCmd = line.translateToString(true).trim();
+                                if (visualCmd) cmd = visualCmd;
+                            }
+                        } catch(e) {}
+                    }
+
+
                     if (this._checkDangerousCmd(sessionId, cmd)) {
-                        console.log('[DCM TRACE] createSessionUI → 已拦截');
                         // 拦截：缓冲 after 中的可打印字符（用户可能在等 toast 时又打了字）
                         for (let i = 0; i < after.length; i++) {
                             const ch = after[i], code = ch.charCodeAt(0);
@@ -4274,7 +4472,6 @@ const App = {
                         }
                         return;
                     }
-                    console.log('[DCM TRACE] createSessionUI → 放行');
                     this.socket.emit('terminal_input', { session_id: sessionId, data: before + '\r' + after });
                     return;
                 }

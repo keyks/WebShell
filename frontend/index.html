@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebTerminal - SSH终端管理器</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=310">
     <link rel="stylesheet" href="/libs/xterm/xterm.min.css">
     <link rel="stylesheet" href="/libs/fontawesome/css/all.min.css">
     
@@ -716,47 +716,82 @@
 <!-- ══════════════════════════════════
      安全审计确认弹窗（高危命令二次确认）
 ══════════════════════════════════ -->
-<div class="modal" id="securityConfirmModal">
-    <div class="modal-overlay"></div>
-    <div class="modal-dialog security-confirm-dialog">
-        <div class="security-confirm-header">
-            <div class="security-icon">
-                <i class="fas fa-shield-alt"></i>
+<div id="securityConfirmBackdrop"></div>
+<div id="securityConfirmModal">
+    <!-- ══════ Header：动画危险图标 ══════ -->
+    <div class="sec-hd">
+        <div class="sec-hd-ring">
+            <div class="sec-hd-core">
+                <i class="fas fa-skull-crossbones"></i>
             </div>
-            <h3>⚠️ 高危命令安全确认</h3>
-            <p class="security-subtitle">后端安全审计系统要求二次确认</p>
+            <svg class="sec-hd-svg" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="46" fill="none" class="sec-hd-track" />
+                <circle cx="50" cy="50" r="46" fill="none" class="sec-hd-arc" id="secHdArc" />
+            </svg>
         </div>
-        <div class="security-confirm-body">
-            <div class="security-risk-badge" id="secRiskBadge">
-                <i class="fas fa-exclamation-triangle"></i>
+        <h3 class="sec-hd-title">高危命令安全确认</h3>
+        <p class="sec-hd-sub" id="secHdSub">系统已拦截该命令，需二次确认后方可执行</p>
+    </div>
+
+    <!-- ══════ Body ══════ -->
+    <div class="sec-bd">
+        <!-- 风险徽章 + 等级 -->
+        <div class="sec-badge-row">
+            <div class="sec-badge" id="secRiskBadge">
+                <i class="fas fa-shield-virus"></i>
                 <span id="secRiskLabel">HIGH</span>
             </div>
-            <div class="security-cmd-box">
-                <code id="secCmdText"></code>
-            </div>
-            <div class="security-detail">
-                <div class="security-detail-row">
-                    <span class="security-label">风险描述</span>
-                    <span class="security-value" id="secDescription"></span>
-                </div>
-                <div class="security-detail-row">
-                    <span class="security-label">安全建议</span>
-                    <span class="security-value suggestion" id="secSuggestion"></span>
-                </div>
-            </div>
-            <p class="security-warning-text">
-                <i class="fas fa-info-circle"></i>
-                请仔细核对命令，确认无误后执行。确认凭据有效期为 <strong>60 秒</strong>。
-            </p>
+            <span class="sec-category" id="secCategory"></span>
         </div>
-        <div class="security-confirm-footer">
-            <button class="btn btn-cancel" id="secCancelBtn">
-                <i class="fas fa-times"></i> 取消执行
-            </button>
-            <button class="btn btn-danger-pulse" id="secConfirmBtn">
-                <i class="fas fa-check"></i> 我已确认，执行此命令
-            </button>
+
+        <!-- 命令展示区（带高亮）-->
+        <div class="sec-cmd-block">
+            <div class="sec-cmd-hd">
+                <i class="fas fa-terminal"></i>
+                <span>拟执行命令</span>
+            </div>
+            <div class="sec-cmd-wrap">
+                <span class="sec-cmd-ps">$</span>
+                <code class="sec-cmd-txt" id="secCmdText"></code>
+            </div>
         </div>
+
+        <!-- 影响维度分析 -->
+        <div class="sec-dmg" id="secDmgPanel">
+            <div class="sec-dmg-title">
+                <i class="fas fa-radiation-alt"></i> 潜在影响
+            </div>
+            <div class="sec-dmg-grid" id="secDmgGrid"></div>
+        </div>
+
+        <!-- 详情描述 -->
+        <div class="sec-infos">
+            <div class="sec-info">
+                <i class="fas fa-exclamation-circle"></i>
+                <div><span class="sec-info-lbl">风险描述</span><span class="sec-info-v" id="secDescription"></span></div>
+            </div>
+            <div class="sec-info">
+                <i class="fas fa-lightbulb"></i>
+                <div><span class="sec-info-lbl">安全建议</span><span class="sec-info-v" id="secSuggestion"></span></div>
+            </div>
+        </div>
+
+        <!-- 倒计时条 -->
+        <div class="sec-cd" id="secCountdown">
+            <div class="sec-cd-bar"><div class="sec-cd-fill" id="secCdFill"></div></div>
+            <span class="sec-cd-txt" id="secCdText">请等待 <strong id="secCdNum">3</strong> 秒后再确认</span>
+        </div>
+    </div>
+
+    <!-- ══════ Footer ══════ -->
+    <div class="sec-ft">
+        <button class="sec-btn-ccl" id="secCancelBtn">
+            <i class="fas fa-times"></i> 取消执行
+        </button>
+        <button class="sec-btn-ok" id="secConfirmBtn" disabled>
+            <i class="fas fa-skull"></i>
+            <span id="secConfirmLabel">我了解风险，执行命令</span>
+        </button>
     </div>
 </div>
 
@@ -877,56 +912,31 @@
 <script src="js/terminal.js?v=305"></script>
 <script src="js/filemanager.js?v=305"></script>
 <script src="js/monitor.js?v=305"></script>
-<script src="js/commands.js?v=305"></script>
-<script src="js/dangerous_commands.js?v=305"></script>
-<script src="js/alerts.js?v=305"></script>
-<script src="js/cluster.js?v=305"></script>
-<script src="js/app.js?v=305"></script>
-<script src="/js/ai_assistant.js?v=305"></script>
+<script src="js/commands.js?v=309"></script>
+<script src="js/dangerous_commands.js?v=310"></script>
+<script src="js/alerts.js?v=309"></script>
+<script src="js/cluster.js?v=309"></script>
+<script src="js/app.js?v=310"></script>
+<script src="/js/ai_assistant.js?v=310"></script>
 
 <!-- 🔧 DCM v2 加载自检：页面加载后自动验证 -->
 <script>
 (function(){
-    var MAX_WAIT = 5000; // 最多等 5 秒
+    var MAX_WAIT = 5000;
     var started = Date.now();
     var check = function() {
         var DCM = window.DangerousCommandManager;
         if (!DCM) {
             if (Date.now() - started < MAX_WAIT) { setTimeout(check, 200); return; }
-            // 超时：DCM 永未加载 → 显示红色持久横幅
-            showBanner(false, 'DCM 模块未加载! 使用内联正则降级', true);
             console.error('❌ DangerousCommandManager 超时未加载，已启用内联正则降级');
             return;
         }
-        // 双测试：rm -r hh 和 rm -rf hh
+        // 静默验证 DCM 规则完整性
         var r1 = DCM.getMatchedRule('rm -r hh');
         var r2 = DCM.getMatchedRule('rm -rf hh');
         var ok = r1 && r1.level === 'high' && r2 && r2.level === 'high';
-        var txt = ok
-            ? '✅ DCM v2 正常 (rm -r/rm -rf → HIGH)'
-            : '❌ DCM 规则缺失! (r1:' + JSON.stringify(r1) + ' r2:' + JSON.stringify(r2) + ')';
-        showBanner(ok, txt, !ok);
-        console.log(txt);
-    };
-    function showBanner(ok, txt, stay) {
-        var div = document.createElement('div');
-        div.id = '_dcm_v2_check';
-        var bg = ok ? '#00b894' : '#e74c3c';
-        div.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);'
-            + 'z-index:99999;padding:8px 20px;font-size:13px;font-weight:700;'
-            + 'color:#fff;background:'+bg+';border-radius:0 0 10px 10px;'
-            + 'box-shadow:0 2px 12px rgba(0,0,0,0.4);'
-            + 'transition:opacity 0.4s;cursor:default;';
-        div.textContent = txt;
-        document.body.appendChild(div);
-        if (!stay) {
-            setTimeout(function(){ div.style.opacity = '0'; }, 6000);
-            setTimeout(function(){ div && div.remove(); }, 6500);
-        } else {
-            // 错误永久显示，点击可关闭
-            div.style.cursor = 'pointer';
-            div.title = '点击关闭';
-            div.onclick = function(){ div.remove(); };
+        if (!ok) {
+            console.error('❌ DCM 规则缺失! (r1:' + JSON.stringify(r1) + ' r2:' + JSON.stringify(r2) + ')');
         }
     };
     if (document.readyState === 'loading') {

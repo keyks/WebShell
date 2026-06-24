@@ -3304,186 +3304,651 @@ body {
    动画增强：toast 动画已在 1754 行统一定义
 ══════════════════════════════════════════ */
 
-/* ══════════════════════════════════════════
-   安全确认弹窗（高危命令二次确认）
-══════════════════════════════════════════ */
-.security-confirm-dialog {
-    max-width: 520px !important;
-    animation: secModalIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-@keyframes secModalIn {
-    from { opacity: 0; transform: translateY(-30px) scale(0.95); }
-    to   { opacity: 1; transform: translateY(0) scale(1); }
+/* ============================================================
+   高危命令安全确认弹窗
+   核心策略：独立的 fixed backdrop + top:50%/left:50% + transform:translate(-50%,-50%)
+   CSS 原生居中，无 JS 计算 left/top，零时序隐患
+   ============================================================ */
+
+/* ── 遮罩层：独立 fixed 元素 ── */
+#securityConfirmBackdrop {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 2000;
+    pointer-events: auto;
 }
 
-.security-confirm-header {
+/* ── 对话框卡片：CSS transform 居中，彻底不再需要 JS 计算 left/top ── */
+#securityConfirmModal {
+    display: none;
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    z-index: 2001 !important;
+    width: 560px;
+    max-width: 94vw;
+    max-height: 88vh;
+    min-width: 360px;
+    min-height: 400px;
+    margin: 0 !important;
+    overflow: hidden;
+    background: var(--bg-secondary);
+    border-radius: 20px;
+    border: 1px solid rgba(244,67,54,0.12);
+    box-shadow:
+        0 0 0 1px rgba(0,0,0,0.08),
+        0 4px 10px rgba(0,0,0,0.12),
+        0 18px 45px -10px rgba(0,0,0,0.5),
+        0 40px 80px -24px rgba(0,0,0,0.4);
+    flex-direction: column;
+    align-items: initial;
+    justify-content: initial;
+}
+
+@keyframes secDialogIn {
+    0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.92); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* ── 头部 ── */
+#securityConfirmModal .sec-hd {
+    position: relative;
     text-align: center;
-    padding: 28px 24px 18px;
-    border-bottom: 1px solid var(--border-color);
-    background: var(--danger-bg);
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: 36px 28px 22px;
+    background: linear-gradient(180deg,
+        rgba(244,67,54,0.09) 0%,
+        rgba(244,67,54,0.03) 60%,
+        transparent 100%);
+    border-bottom: 1px solid rgba(244,67,54,0.10);
+    flex-shrink: 0;
+    overflow: hidden;
 }
-.security-confirm-header .security-icon {
-    width: 56px; height: 56px;
+
+/* 头部微妙的扫描线装饰 */
+#securityConfirmModal .sec-hd::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(244,67,54,0.3) 20%,
+        rgba(244,67,54,0.5) 50%,
+        rgba(244,67,54,0.3) 80%,
+        transparent 100%);
+}
+
+/* ── 旋转光环图标 ── */
+#securityConfirmModal .sec-hd-ring {
+    width: 84px;
+    height: 84px;
+    margin: 0 auto 18px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#securityConfirmModal .sec-hd-core {
+    width: 60px;
+    height: 60px;
     border-radius: 50%;
-    background: var(--danger-color);
-    display: flex; align-items: center; justify-content: center;
-    margin: 0 auto 12px;
-    box-shadow: var(--shadow-danger);
+    background: linear-gradient(140deg, #f44336, #c62828);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow:
+        0 0 30px rgba(244,67,54,0.4),
+        inset 0 1px 0 rgba(255,255,255,0.15);
+    z-index: 2;
+    position: relative;
+    animation: secPulse 2.2s ease-in-out infinite;
 }
-.security-confirm-header .security-icon i {
-    font-size: 26px; color: #fff;
+
+#securityConfirmModal .sec-hd-core i {
+    font-size: 24px;
+    color: #fff;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.35));
 }
-.security-confirm-header h3 {
-    font-size: 18px; font-weight: 600;
+
+@keyframes secPulse {
+    0%, 100% {
+        box-shadow: 0 0 18px rgba(244,67,54,0.25), inset 0 1px 0 rgba(255,255,255,0.15);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 0 50px rgba(244,67,54,0.7), inset 0 1px 0 rgba(255,255,255,0.15);
+        transform: scale(1.04);
+    }
+}
+
+/* SVG 旋转光环 */
+#securityConfirmModal .sec-hd-svg {
+    position: absolute;
+    inset: -6px;
+    width: 96px;
+    height: 96px;
+    animation: secRingSpin 9s linear infinite;
+    z-index: 1;
+}
+
+#securityConfirmModal .sec-hd-track {
+    fill: none;
+    stroke: rgba(244,67,54,0.08);
+    stroke-width: 2.5;
+}
+
+#securityConfirmModal .sec-hd-arc {
+    fill: none;
+    stroke: rgba(244,67,54,0.55);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-dasharray: 180 109;
+    stroke-dashoffset: 0;
+}
+
+@keyframes secRingSpin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+/* 标题 */
+#securityConfirmModal .sec-hd-title {
+    font-size: 19px;
+    font-weight: 700;
     color: var(--text-bright);
     margin: 0 0 6px;
+    letter-spacing: 0.2px;
 }
-.security-confirm-header .security-subtitle {
-    font-size: 13px; color: var(--text-secondary);
+
+#securityConfirmModal .sec-hd-sub {
+    font-size: 13px;
+    color: var(--text-secondary);
     margin: 0;
+    font-weight: 400;
+    line-height: 1.5;
+    opacity: 0.85;
 }
 
-.security-confirm-body {
-    padding: 20px 24px;
+/* ── 主体内容区（可滚动 + 自定义滚动条） ── */
+#securityConfirmModal .sec-bd {
+    padding: 22px 28px 18px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    scroll-behavior: smooth;
 }
 
-/* 风险等级徽章 */
-.security-risk-badge {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 6px 14px;
-    border-radius: var(--radius-pill);
-    font-size: 12px; font-weight: 700;
-    letter-spacing: 0.5px;
+#securityConfirmModal .sec-bd::-webkit-scrollbar {
+    width: 5px;
+}
+#securityConfirmModal .sec-bd::-webkit-scrollbar-track {
+    background: transparent;
+}
+#securityConfirmModal .sec-bd::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 10px;
+}
+#securityConfirmModal .sec-bd::-webkit-scrollbar-thumb:hover {
+    background: rgba(244,67,54,0.25);
+}
+
+/* ── 风险徽章 ── */
+#securityConfirmModal .sec-badge-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+#securityConfirmModal .sec-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 16px 6px 11px;
+    border-radius: 22px;
+    font-size: 12px;
+    font-weight: 700;
     text-transform: uppercase;
-    margin-bottom: 16px;
+    letter-spacing: 0.7px;
+    line-height: 1;
 }
-.security-risk-badge.high {
-    background: var(--danger-bg);
-    color: var(--danger-color);
-    border: 1px solid rgba(244,71,71,0.25);
+
+#securityConfirmModal .sec-badge.high {
+    background: rgba(244,67,54,0.12);
+    color: #ef5350;
+    border: 1px solid rgba(244,67,54,0.22);
 }
-.security-risk-badge.medium {
-    background: var(--warning-bg);
-    color: var(--warning-color);
+
+#securityConfirmModal .sec-badge.critical {
+    background: rgba(198,40,40,0.2);
+    color: #ff5252;
+    border: 1px solid rgba(198,40,40,0.45);
+    animation: secBadgeFlash 1.6s ease-in-out infinite;
+}
+
+@keyframes secBadgeFlash {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(244,67,54,0.3); }
+    50%      { box-shadow: 0 0 18px 4px rgba(244,67,54,0.15); }
+}
+
+#securityConfirmModal .sec-badge.medium {
+    background: rgba(255,167,38,0.1);
+    color: #ffa726;
     border: 1px solid rgba(255,167,38,0.25);
 }
-.security-risk-badge.critical {
-    background: rgba(244,71,71,0.15);
-    color: #fff;
-    border: 1px solid var(--danger-color);
-    animation: badgePulse 1.2s infinite;
-}
-@keyframes badgePulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(244,71,71,0.4); }
-    50%      { box-shadow: 0 0 0 6px rgba(244,71,71,0); }
+
+#securityConfirmModal .sec-category {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    opacity: 0.8;
 }
 
-/* 命令展示 */
-.security-cmd-box {
-    background: var(--bg-primary);
+/* ── 命令展示区 ── */
+#securityConfirmModal .sec-cmd-block {
+    margin-bottom: 18px;
+    background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    margin-bottom: 16px;
-    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
-.security-cmd-box::before {
-    content: "$";
-    position: absolute;
-    left: 12px;
-    top: 14px;
-    color: var(--success-color);
-    font-family: var(--font-mono);
-    font-size: 13px;
+
+#securityConfirmModal .sec-cmd-hd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 16px;
+    font-size: 11px;
     font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+    border-bottom: 1px solid var(--border-color);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
 }
-.security-cmd-box code {
-    display: block;
-    padding-left: 18px;
-    font-family: var(--font-mono);
-    font-size: 14px;
+
+#securityConfirmModal .sec-cmd-hd i {
+    font-size: 12px;
+    color: var(--accent-color);
+}
+
+#securityConfirmModal .sec-cmd-wrap {
+    display: flex;
+    align-items: flex-start;
+    padding: 15px 18px;
+    font-family: var(--font-mono, 'Cascadia Code', 'Fira Code', Consolas, 'Courier New', monospace);
+    font-size: 13px;
+    background: var(--bg-primary);
+    min-height: 48px;
+}
+
+#securityConfirmModal .sec-cmd-ps {
+    color: #4caf50;
+    font-size: 15px;
+    font-weight: 700;
+    margin-right: 12px;
+    flex-shrink: 0;
+    user-select: none;
+    line-height: 1;
+    padding-top: 1px;
+}
+
+#securityConfirmModal .sec-cmd-txt {
+    font-size: 13px;
     color: var(--text-bright);
     word-break: break-all;
-    line-height: 1.6;
+    line-height: 1.7;
+    flex: 1;
 }
 
-/* 详情行 */
-.security-detail {
-    margin-bottom: 16px;
+#securityConfirmModal .sec-cmd-txt .cmd-hl {
+    background: rgba(244,67,54,0.2);
+    color: #ff6e6e;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 700;
+    border-left: 3px solid rgba(244,67,54,0.7);
+    display: inline;
 }
-.security-detail-row {
-    display: flex; gap: 12px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border-light);
-}
-.security-detail-row:last-child {
-    border-bottom: none;
-}
-.security-label {
-    font-size: 12px; color: var(--text-secondary);
-    flex-shrink: 0; width: 60px;
-    padding-top: 2px;
-}
-.security-value {
-    font-size: 13px; color: var(--text-primary);
-    line-height: 1.5;
-}
-.security-value.suggestion {
+
+#securityConfirmModal .sec-cmd-txt .cmd-path {
     color: var(--warning-color);
+    font-weight: 600;
+    background: rgba(255,167,38,0.1);
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+/* ── 影响分析面板 ── */
+#securityConfirmModal .sec-dmg {
+    margin-bottom: 18px;
+    background: linear-gradient(135deg,
+        rgba(244,67,54,0.04) 0%,
+        rgba(244,67,54,0.02) 50%,
+        transparent 100%);
+    border: 1px solid rgba(244,67,54,0.10);
+    border-radius: 12px;
+    padding: 14px 18px;
+}
+
+#securityConfirmModal .sec-dmg-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-weight: 600;
+}
+
+#securityConfirmModal .sec-dmg-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+#securityConfirmModal .sec-dmg-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 12px;
     font-weight: 500;
+    transition: all 0.2s ease;
 }
 
-/* 提示信息 */
-.security-warning-text {
-    display: flex; align-items: flex-start; gap: 8px;
-    font-size: 12px; color: var(--text-secondary);
+#securityConfirmModal .sec-dmg-item.active {
+    background: rgba(244,67,54,0.09);
+    border: 1px solid rgba(244,67,54,0.17);
+    color: var(--text-bright);
+    box-shadow: 0 1px 4px rgba(244,67,54,0.06);
+}
+
+#securityConfirmModal .sec-dmg-item.inactive {
+    opacity: 0.32;
+    color: var(--text-secondary);
     background: var(--bg-hover);
-    border-radius: var(--radius-sm);
-    padding: 10px 12px;
-    margin: 0;
-    line-height: 1.5;
 }
-.security-warning-text i { color: var(--accent-color); margin-top: 1px; flex-shrink: 0; }
-.security-warning-text strong { color: var(--warning-color); }
 
-/* 底部按钮 */
-.security-confirm-footer {
-    display: flex; gap: 12px;
-    padding: 16px 24px 20px;
+#securityConfirmModal .sec-dmg-item .sec-dmg-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    width: 18px;
+    text-align: center;
+}
+#securityConfirmModal .sec-dmg-item.active .sec-dmg-icon {
+    color: #ef5350;
+}
+
+@media (max-width: 480px) {
+    #securityConfirmModal .sec-dmg-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* ── 详情描述 ── */
+#securityConfirmModal .sec-infos {
+    margin-bottom: 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 6px 16px;
+}
+
+#securityConfirmModal .sec-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border-color);
+}
+#securityConfirmModal .sec-info:last-child {
+    border-bottom: none;
+    padding-bottom: 13px;
+}
+
+#securityConfirmModal .sec-info > i {
+    font-size: 15px;
+    color: var(--text-secondary);
+    margin-top: 1px;
+    flex-shrink: 0;
+    width: 18px;
+    text-align: center;
+}
+
+#securityConfirmModal .sec-info-lbl {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin-bottom: 4px;
+}
+
+#securityConfirmModal .sec-info-v {
+    font-size: 13px;
+    color: var(--text-bright);
+    line-height: 1.55;
+}
+
+/* ── 倒计时 ── */
+#securityConfirmModal .sec-cd {
+    margin-top: 6px;
+}
+
+#securityConfirmModal .sec-cd-bar {
+    height: 4px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 4px;
+    margin-bottom: 8px;
+    overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+}
+
+#securityConfirmModal .sec-cd-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #c62828, #ef5350, #ff7043);
+    background-size: 200% 100%;
+    animation: secCdShimmer 1.5s ease-in-out infinite;
+    transition: width 0.3s linear;
+    box-shadow: 0 0 8px rgba(244,67,54,0.35);
+}
+
+@keyframes secCdShimmer {
+    0%, 100% { background-position: 0% 50%; }
+    50%      { background-position: 100% 50%; }
+}
+
+#securityConfirmModal .sec-cd-txt {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+#securityConfirmModal .sec-cd-txt strong {
+    color: #ef5350;
+    font-size: 17px;
+    font-weight: 700;
+    min-width: 20px;
+    text-align: center;
+    display: inline-block;
+}
+
+/* ── 底部按钮栏 ── */
+#securityConfirmModal .sec-ft {
+    display: flex;
+    gap: 14px;
+    padding: 18px 28px 22px;
     border-top: 1px solid var(--border-color);
+    flex-shrink: 0;
+    background: var(--bg-tertiary);
 }
-.security-confirm-footer .btn {
-    flex: 1; padding: 12px 16px;
-    font-size: 14px; border-radius: var(--radius);
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    cursor: pointer; transition: var(--transition);
-    border: none; font-family: inherit;
+
+#securityConfirmModal .sec-ft button {
+    flex: 1;
+    padding: 13px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: none;
+    font-family: inherit;
+    letter-spacing: 0.3px;
+    position: relative;
+    overflow: hidden;
 }
-.security-confirm-footer .btn-cancel {
+
+/* 取消按钮 */
+#securityConfirmModal .sec-btn-ccl {
     background: var(--bg-hover);
     color: var(--text-primary);
+    border: 1px solid var(--border-color);
 }
-.security-confirm-footer .btn-cancel:hover {
+#securityConfirmModal .sec-btn-ccl:hover {
     background: var(--bg-active);
-}
-.security-confirm-footer .btn-danger-pulse {
-    background: var(--danger-color);
-    color: #fff; font-weight: 600;
-    animation: dangerPulse 2s infinite;
-    box-shadow: var(--shadow-danger);
-}
-.security-confirm-footer .btn-danger-pulse:hover {
-    background: #d63c3c;
-    transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(244,71,71,0.45);
-}
-@keyframes dangerPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(244,71,71,0.5); }
-    50%      { box-shadow: 0 0 0 8px rgba(244,71,71,0); }
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
-/* Modal 点击遮罩关闭控制 */
-#securityConfirmModal .modal-overlay {
-    cursor: default;  /* 安全弹窗不允许点击遮罩关闭 */
+/* 确认按钮 */
+#securityConfirmModal .sec-btn-ok {
+    background: linear-gradient(135deg, #d32f2f 0%, #b71c1c 100%);
+    color: #fff;
+    box-shadow: 0 4px 18px rgba(211,47,47,0.35);
+    font-weight: 700;
 }
+#securityConfirmModal .sec-btn-ok::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg,
+        rgba(255,255,255,0) 0%,
+        rgba(255,255,255,0.05) 40%,
+        rgba(255,255,255,0.1) 50%,
+        rgba(255,255,255,0) 60%);
+    pointer-events: none;
+}
+#securityConfirmModal .sec-btn-ok:hover:not(:disabled) {
+    background: linear-gradient(135deg, #c62828 0%, #a11414 100%);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 28px rgba(211,47,47,0.5);
+}
+#securityConfirmModal .sec-btn-ok:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: 0 3px 10px rgba(211,47,47,0.25);
+    transition: all 0.08s ease;
+}
+#securityConfirmModal .sec-btn-ok:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    filter: grayscale(50%);
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+/* ════════════════════════════════════════════════════════════
+   高危命令确认弹窗 - 强制居中修复（覆盖所有内联样式）
+   v310 防御性追加层
+   ════════════════════════════════════════════════════════════ */
+
+/* 弹窗打开时禁止页面滚动 */
+body.modal-open {
+    overflow: hidden !important;
+}
+
+#securityConfirmBackdrop {
+    display: none !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    background: rgba(0,0,0,0.65) !important;
+    backdrop-filter: blur(8px) !important;
+    -webkit-backdrop-filter: blur(8px) !important;
+    z-index: 2000 !important;
+    pointer-events: auto !important;
+}
+
+#securityConfirmBackdrop.visible {
+    display: block !important;
+}
+
+#securityConfirmModal {
+    display: none !important;
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    z-index: 2001 !important;
+    width: 560px !important;
+    max-width: 94vw !important;
+    max-height: 88vh !important;
+    min-width: 360px !important;
+    min-height: 400px !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    background: var(--bg-secondary) !important;
+    border-radius: 20px !important;
+    border: 1px solid rgba(244,67,54,0.12) !important;
+    box-shadow:
+        0 0 0 1px rgba(0,0,0,0.08),
+        0 4px 10px rgba(0,0,0,0.12),
+        0 18px 45px -10px rgba(0,0,0,0.5),
+        0 40px 80px -24px rgba(0,0,0,0.4) !important;
+    flex-direction: column !important;
+    align-items: initial !important;
+    justify-content: initial !important;
+    animation: secDialogIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+#securityConfirmModal.visible {
+    display: flex !important;
+}
+
+/* 当遮罩显示时，确保弹窗可见（兄弟选择器兜底） */
+#securityConfirmBackdrop.visible ~ #securityConfirmModal,
+#securityConfirmBackdrop.visible + #securityConfirmModal {
+    display: flex !important;
+}
+
+/* 小屏适配 */
+@media (max-width: 480px) {
+    #securityConfirmModal {
+        width: 94vw !important;
+        max-width: 94vw !important;
+        min-width: unset !important;
+        min-height: 360px !important;
+        max-height: 92vh !important;
+        border-radius: 16px !important;
+    }
+}
+
+@media (max-height: 600px) {
+    #securityConfirmModal {
+        max-height: 92vh !important;
+        min-height: 300px !important;
+    }
+}
+

@@ -428,6 +428,26 @@ const AIAssistant = {
 
         wrapper.appendChild(titleBar);
         wrapper.appendChild(content);
+
+        // 🔧 右下角 resize 手柄
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = `
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            cursor: nwse-resize;
+            z-index: 10;
+        `;
+        resizeHandle.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 12 12" style="position:absolute;bottom:2px;right:2px;opacity:0.4;">
+                <path d="M0 12 L12 0 L12 4 L4 12 Z" fill="var(--text-secondary)"/>
+                <path d="M4 12 L12 4 L12 8 L8 12 Z" fill="var(--text-secondary)"/>
+                <path d="M8 12 L12 8 L12 12 Z" fill="var(--text-secondary)"/>
+            </svg>`;
+        wrapper.appendChild(resizeHandle);
+
         document.body.appendChild(wrapper);
 
         // 🔧 动画结束后清理 animation 属性，防止快速切换导致的样式污染
@@ -445,6 +465,9 @@ const AIAssistant = {
 
         // 拖拽支持
         this._initFloatDrag(titleBar, wrapper, 'global');
+
+        // resize 支持
+        this._initFloatResize(resizeHandle, wrapper, 'global');
 
         // 窗口 resize 响应式处理
         this._registerFloatResizeHandler('global', wrapper);
@@ -468,7 +491,7 @@ const AIAssistant = {
             }
         }, 200);
 
-        App.toast('智能助手已打开，可拖拽移动位置', 'info');
+        App.toast('智能助手已打开，可拖拽移动、右下角调整大小', 'info');
     },
 
     /**
@@ -487,6 +510,11 @@ const AIAssistant = {
 
         // 清理 resize 处理器
         this._unregisterFloatResizeHandler('global');
+        // 清理 resize 手柄处理器
+        if (this._floatResizeCleanups && this._floatResizeCleanups['global']) {
+            try { this._floatResizeCleanups['global'](); } catch (e) {}
+            delete this._floatResizeCleanups['global'];
+        }
         // 清理拖拽处理器
         if (this._floatCleanups && this._floatCleanups['global']) {
             try { this._floatCleanups['global'](); } catch (e) {}
