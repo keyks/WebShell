@@ -838,14 +838,7 @@ const FileManager = {
         const sessionId = this.currentSessionId;
         const url = `/api/sftp/${sessionId}/download?path=${encodeURIComponent(file.path)}`;
 
-        // 小文件直接下载
-        if (file.size > 0 && file.size < 100 * 1024 * 1024) {
-            const a = document.createElement('a');
-            a.href = url; a.download = file.name; a.click();
-            return;
-        }
-
-        // 大文件：XHR + 悬浮球进度
+        // 统一使用 XHR + blob 下载（小文件也会携带 JWT 认证头）
         this._downloadWithXHR(url, file.name, file.size);
     },
 
