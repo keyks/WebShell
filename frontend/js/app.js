@@ -1447,6 +1447,10 @@ const App = {
             // 🔧 Ctrl+C 选中复制 / Ctrl+V 粘贴
             term.attachCustomKeyEventHandler((e) => {
                 if (e.ctrlKey && !e.shiftKey && e.key === 'c' && term.hasSelection()) {
+                    // 防抖：300ms 内不重复处理（修复 xterm keydown+keypress 双事件触发）
+                    const now = Date.now();
+                    if (this._lastCtrlC && now - this._lastCtrlC < 300) return false;
+                    this._lastCtrlC = now;
                     const sel = term.getSelection();
                     if (sel) {
                         navigator.clipboard.writeText(sel).then(() => {
@@ -3512,6 +3516,15 @@ const App = {
             this._addNotification(message, type);
         }
 
+        // ── 去重：同一消息 500ms 内不重复弹 ──
+        const dedupKey = `${type}:${message}`;
+        const now = Date.now();
+        if (!this._toastTimers) this._toastTimers = {};
+        if (this._toastTimers[dedupKey] && now - this._toastTimers[dedupKey] < 500) {
+            return;  // 去重跳过
+        }
+        this._toastTimers[dedupKey] = now;
+
         // 渲染 toast
         let container = document.getElementById('toastContainer');
         if (!container) {
@@ -4002,6 +4015,10 @@ const App = {
             // 🔧 Ctrl+C 选中复制 / Ctrl+V 粘贴（不再依赖后端 SIGINT 处理复制场景）
             term.attachCustomKeyEventHandler((e) => {
                 if (e.ctrlKey && !e.shiftKey && e.key === 'c' && term.hasSelection()) {
+                    // 防抖：300ms 内不重复处理（修复 xterm keydown+keypress 双事件触发）
+                    const now = Date.now();
+                    if (this._lastCtrlC && now - this._lastCtrlC < 300) return false;
+                    this._lastCtrlC = now;
                     const sel = term.getSelection();
                     if (sel) {
                         navigator.clipboard.writeText(sel).then(() => {
