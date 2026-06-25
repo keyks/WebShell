@@ -512,6 +512,12 @@ chmod 600 ~/.webterminal/.jwt_key
 
 ---
 
+## 联系方式
+
+- **QQ**: 727418053@qq.com
+
+---
+
 ## 许可证
 
 MIT License
