@@ -435,6 +435,47 @@ def me():
     })
 
 
+@app.route('/api/auth/refresh', methods=['POST'])
+def refresh_token():
+    """刷新 JWT Token，允许已过期但仍在宽限期内的 Token 续期（免重新登录）"""
+    try:
+        # 从 Authorization Header 获取原始 Token
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'status': 'error', 'message': '缺少 Authorization Header'}), 401
+        raw_jwt = auth_header[7:]
+
+        # 强制解码，即使已过期也尝试获取身份信息
+        decoded = decode_token(raw_jwt, allow_expired=True)
+        username = decoded.get('sub', '')
+        if not username:
+            return jsonify({'status': 'error', 'message': '无效 Token'}), 401
+
+        # 检查黑名单
+        jti = decoded.get('jti', '')
+        with _token_blacklist_lock:
+            if jti in _token_blacklist:
+                return jsonify({'status': 'error', 'message': 'Token 已失效，请重新登录'}), 401
+
+        # 宽限期：过期后 7 天内可刷新，超过则必须重新登录
+        exp = decoded.get('exp', 0)
+        if exp > 0:
+            max_age = exp + 7 * 86400
+            if time.time() > max_age:
+                return jsonify({'status': 'error', 'message': 'Token 过期超过 7 天，请重新登录'}), 401
+
+        # 签发新 Token
+        new_token = create_access_token(identity=username)
+        return jsonify({
+            'status': 'ok',
+            'token': new_token,
+            'username': username,
+            'expires_in': config.JWT_ACCESS_TOKEN_EXPIRES_HOURS * 3600
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Token 刷新失败: {str(e)}'}), 401
+
+
 # ══════════════════════════════════════════
 #  连接管理 API
 # ══════════════════════════════════════════
@@ -1624,6 +1665,7 @@ def _mask_key(key: str) -> str:
 # ══════════════════════════════════════════
 
 _ws_auth: dict = {}
+_ws_sessions: dict[str, set] = {}  # 🔧 client_sid -> set of session_ids，用于断连时清理
 
 # ══════════════════════════════════════════
 #  高危命令确认 Token 机制
@@ -1744,6 +1786,15 @@ def on_disconnect():
     else:
         log.debug(f'[WS] 未认证连接断开: {sid}')
 
+    # 🔧 清理该客户端的所有 SSH 会话，防止资源泄漏
+    session_ids = _ws_sessions.pop(sid, set())
+    for s_id in session_ids:
+        try:
+            ssh_manager.remove_session(s_id)
+            log.info(f'[WS] 断连清理 SSH 会话: {s_id} (客户端 {sid})')
+        except Exception as e:
+            log.error(f'[WS] 清理会话失败 {s_id}: {e}')
+
 
 def _ws_require_auth(fn):
     @wraps(fn)
@@ -1768,6 +1819,7 @@ def _start_read_loop(client_sid: str, session_id: str):
     """
     def _loop(sid, s_id):
         consecutive_errors = 0
+        _last_health_check = time.time()
         while True:
             session = ssh_manager.get_session(s_id)
             if not session:
@@ -1784,6 +1836,28 @@ def _start_read_loop(client_sid: str, session_id: str):
                 break
             if session.should_stop():
                 break
+
+            # 🔧 SSH 传输层活性检测：每 30 秒检查一次 transport 是否仍然活跃
+            now = time.time()
+            if now - _last_health_check > 30:
+                _last_health_check = now
+                try:
+                    if session.client:
+                        transport = session.client.get_transport()
+                        if transport and not transport.is_active():
+                            log.warning(
+                                f'[read_loop] SSH transport 不活跃，标记断开: {s_id}'
+                            )
+                            session.connected = False
+                            socketio.emit(
+                                'terminal_closed',
+                                {'session_id': s_id,
+                                 'reason': 'SSH 连接已断开（传输层超时）'},
+                                room=sid
+                            )
+                            break
+                except Exception as health_err:
+                    log.debug(f'[read_loop] 健康检查异常: {health_err}')
 
             try:
                 out = session.read_output()
@@ -1858,6 +1932,8 @@ def on_open_terminal(data):
                  target=conn_info.get('host', ''), ip=_get_real_ip())
     emit('terminal_connected', {'session_id': session_id})
     _start_read_loop(client_sid, session_id)
+    # 🔧 注册客户端-会话映射，用于断连时清理
+    _ws_sessions.setdefault(client_sid, set()).add(session_id)
 
 
 @socketio.on('quick_connect')
@@ -1905,9 +1981,8 @@ def on_quick_connect(data):
                  target=conn_info['host'], ip=_get_real_ip())
     emit('terminal_connected', {'session_id': session_id})
     _start_read_loop(client_sid, session_id)
-
-
-@socketio.on('terminal_input')
+    # 🔧 注册客户端-会话映射，用于断连时清理
+    _ws_sessions.setdefault(client_sid, set()).add(session_id)
 @_ws_require_auth
 def on_terminal_input(data):
     raw_data = data.get('data', '')                # 保留原始数据（含 \r），用于发送到 PTY
@@ -2035,8 +2110,11 @@ def on_terminal_resize(data):
 @socketio.on('close_terminal')
 @_ws_require_auth
 def on_close_terminal(data):
+    client_sid = request.sid
     session_id = data.get('session_id')
     ssh_manager.remove_session(session_id)
+    # 🔧 从客户端-会话映射中移除
+    _ws_sessions.get(client_sid, set()).discard(session_id)
     emit('terminal_closed', {'session_id': session_id})
 
 

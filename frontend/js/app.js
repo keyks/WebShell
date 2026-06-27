@@ -399,6 +399,9 @@ const App = {
 
         // 启动功能介绍展示页（屏保模式）
         setTimeout(() => window.FeaturePage?.init(), 100);
+
+        // 🔧 启动 Token 自动续期定时器
+        this._startTokenRefresh();
     },
 
     // ══════════════════════════════
@@ -472,13 +475,29 @@ const App = {
             if (typeof recoveryManager !== 'undefined') {
                 recoveryManager.onReconnect();
             }
+            // 🔧 启动应用层心跳：每 25 秒发送 ping，主动探测连接状态
+            this._clearPingInterval();
+            this._pingInterval = setInterval(() => {
+                if (this.socket?.connected) {
+                    this.socket.emit('ping');
+                }
+            }, 25000);
         };
         this.socket.on('connect', onConnect);
         L.push({ event: 'connect', fn: onConnect });
 
+        // 🔧 监听服务器 pong 心跳响应（用于调试）
+        const onPong = (data) => {
+            this._debugLog('[WS] 收到 pong:', data?.timestamp);
+        };
+        this.socket.on('pong', onPong);
+        L.push({ event: 'pong', fn: onPong });
+
         const onDisconnect = (reason) => {
             this._debugLog('WebSocket 已断开:', reason);
             console.warn('[WS] 已断开:', reason);
+            // 🔧 断开时清除心跳定时器
+            this._clearPingInterval();
             if (typeof recoveryManager !== 'undefined') {
                 recoveryManager.onDisconnect(reason);
             }
@@ -627,11 +646,102 @@ const App = {
         this._socketListeners = [];
     },
 
+    _clearPingInterval() {
+        if (this._pingInterval) {
+            clearInterval(this._pingInterval);
+            this._pingInterval = null;
+        }
+    },
+
     _handleAuthExpired() {
         this._token = '';
         localStorage.removeItem('wt_token');
+        localStorage.removeItem('wt_token_exp');
+        this._stopTokenRefresh();
         this.toast('请先登录', 'warning', 2000);
         setTimeout(() => { this.showSettings(); }, 800);
+    },
+
+    // ══════════════════════════════
+    //  Token 自动续期
+    // ══════════════════════════════
+
+    _decodeJwtPayload(token) {
+        /** 解码 JWT payload（不验证签名，仅提取过期时间） */
+        try {
+            const parts = token.split('.');
+            if (parts.length !== 3) return null;
+            return JSON.parse(atob(parts[1]));
+        } catch (_) { return null; }
+    },
+
+    _startTokenRefresh() {
+        /** 根据 Token 过期时间安排自动续期 */
+        this._stopTokenRefresh();
+        if (!this._token) return;
+
+        const expMs = parseInt(localStorage.getItem('wt_token_exp') || '0');
+        if (!expMs) {
+            // 如果没有存储 exp，尝试从 token 解码
+            const payload = this._decodeJwtPayload(this._token);
+            if (payload && payload.exp) {
+                localStorage.setItem('wt_token_exp', payload.exp * 1000);
+            } else {
+                return; // 无法获取过期时间，跳过
+            }
+        }
+
+        const expiresInMs = parseInt(localStorage.getItem('wt_token_exp') || '0') - Date.now();
+        if (expiresInMs <= 0) {
+            // Token 已过期，尝试立即刷新
+            this._refreshToken();
+            return;
+        }
+
+        // 在过期前 1 小时续期，或剩余时间的一半（取更短的那个）
+        const advanceRefresh = Math.min(expiresInMs - 3600000, expiresInMs / 2);
+        const delay = Math.max(60000, advanceRefresh); // 最少 60 秒
+
+        this._debugLog(`Token 将在 ${Math.round(expiresInMs / 60000)} 分钟后过期，${Math.round(delay / 60000)} 分钟后自动续期`);
+        this._refreshTimer = setTimeout(() => this._refreshToken(), delay);
+    },
+
+    _stopTokenRefresh() {
+        if (this._refreshTimer) {
+            clearTimeout(this._refreshTimer);
+            this._refreshTimer = null;
+        }
+    },
+
+    async _refreshToken() {
+        /** 调用后端刷新 Token */
+        if (!this._token) return;
+        try {
+            const r = await fetch('/api/auth/refresh', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${this._token}`, 'Content-Type': 'application/json' }
+            });
+            const d = await r.json();
+            if (d.status === 'ok') {
+                this._token = d.token;
+                localStorage.setItem('wt_token', d.token);
+                const payload = this._decodeJwtPayload(d.token);
+                if (payload && payload.exp) {
+                    localStorage.setItem('wt_token_exp', payload.exp * 1000);
+                }
+                this._debugLog('Token 已自动续期，新有效期:', d.expires_in / 3600, '小时');
+                // 继续安排下一次续期
+                this._startTokenRefresh();
+            } else {
+                console.warn('[Token] 续期失败:', d.message);
+                // 5 分钟后重试
+                this._refreshTimer = setTimeout(() => this._refreshToken(), 300000);
+            }
+        } catch (e) {
+            console.error('[Token] 续期网络错误:', e.message);
+            // 5 分钟后重试
+            this._refreshTimer = setTimeout(() => this._refreshToken(), 300000);
+        }
     },
 
     // ══════════════════════════════
@@ -800,6 +910,12 @@ const App = {
             if (d.status === 'ok') {
                 this._token = d.token;
                 localStorage.setItem('wt_token', d.token);
+                // 解析 Token 过期时间并启动自动续期
+                const payload = this._decodeJwtPayload(d.token);
+                if (payload && payload.exp) {
+                    localStorage.setItem('wt_token_exp', payload.exp * 1000);
+                }
+                this._startTokenRefresh();
                 this.toast(`欢迎，${d.username}`, 'success');
                 this.closeModal('settingsModal');
                 // 重新初始化 WebSocket 和数据
@@ -827,6 +943,8 @@ const App = {
     doLogout() {
         this._token = '';
         localStorage.removeItem('wt_token');
+        localStorage.removeItem('wt_token_exp');
+        this._stopTokenRefresh();
         this.toast('已退出登录', 'info');
         this.closeModal('settingsModal');
         // 断开 WebSocket

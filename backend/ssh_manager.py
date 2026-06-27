@@ -250,6 +250,16 @@ class SSHSession:
             self.connected    = True
             self._last_active = time.time()
             self._stop_flag.clear()
+
+            # 🔧 启用 SSH Transport TCP Keepalive，防止空闲连接被防火墙/NAT 丢弃
+            try:
+                transport = self.client.get_transport()
+                if transport:
+                    transport.set_keepalive(config.SSH_KEEPALIVE_INTERVAL)
+                    log.info(f'[SSH] TCP keepalive 已启用 ({config.SSH_KEEPALIVE_INTERVAL}s)')
+            except Exception as e:
+                log.warning(f'[SSH] 设置 keepalive 失败: {e}')
+
             log.info(f'[SSH] [步骤5] ✅ shell 已打开 (耗时 {time.time()-_t5:.2f}s)')
 
             _total = time.time() - _t0

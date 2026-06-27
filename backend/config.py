@@ -220,6 +220,7 @@ class Config:
     SSH_CONNECT_TIMEOUT: int = int(os.environ.get('SSH_CONNECT_TIMEOUT', '30'))
     SSH_BANNER_TIMEOUT: int = int(os.environ.get('SSH_BANNER_TIMEOUT', '20'))
     SSH_AUTH_TIMEOUT: int = int(os.environ.get('SSH_AUTH_TIMEOUT',    '30'))
+    SSH_KEEPALIVE_INTERVAL: int = int(os.environ.get('SSH_KEEPALIVE_INTERVAL', '30'))  # TCP keepalive 间隔（秒）
     PORT_TEST_TIMEOUT: int = int(os.environ.get('PORT_TEST_TIMEOUT', '5'))
     MAX_SESSIONS: int = int(os.environ.get('MAX_SESSIONS', '50'))
 
