@@ -482,6 +482,8 @@ const App = {
                     this.socket.emit('ping');
                 }
             }, 25000);
+            // 🔧 断线重连：恢复所有活跃的终端会话
+            this._reclaimAllSessions();
         };
         this.socket.on('connect', onConnect);
         L.push({ event: 'connect', fn: onConnect });
@@ -650,6 +652,36 @@ const App = {
         if (this._pingInterval) {
             clearInterval(this._pingInterval);
             this._pingInterval = null;
+        }
+    },
+
+    // 🔧 断线重连：恢复所有活跃终端会话
+    _reclaimAllSessions() {
+        if (!this.socket?.connected) return;
+        const activeIds = Object.keys(this.sessions);
+        if (activeIds.length === 0) return;
+        this._debugLog('重连恢复会话:', activeIds.length, '个');
+        for (const sessionId of activeIds) {
+            const s = this.sessions[sessionId];
+            // 跳过正在重连中的会话（已经有 retrySession 在处理）
+            if (s._isReconnecting) continue;
+            if (s.connId) {
+                // 已保存的连接：重新打开终端（后端会复用已存在的 SSH 会话）
+                this.socket.emit('open_terminal', { conn_id: s.connId, session_id: sessionId });
+                this._debugLog('重连恢复 open_terminal:', sessionId, s.connId);
+            } else if (s.quickConnInfo) {
+                // 快速连接：重新连接（后端会复用已存在的 SSH 会话）
+                this.socket.emit('quick_connect', {
+                    session_id:   sessionId,
+                    host:         s.quickConnInfo.host,
+                    port:         s.quickConnInfo.port,
+                    username:     s.quickConnInfo.username,
+                    password:     s.quickConnInfo.password,
+                    private_key:  s.quickConnInfo.privateKey,
+                    save_history: false,  // 重连不重复保存历史
+                });
+                this._debugLog('重连恢复 quick_connect:', sessionId);
+            }
         }
     },
 
@@ -1542,34 +1574,54 @@ const App = {
 
     retrySession(sessionId) {
         const session = this.sessions[sessionId];
-        if (!session) return;
+        if (!session) {
+            this.toast('会话不存在，请重新打开连接', 'error');
+            return;
+        }
 
         this._debugLog('RetrySession:', { sessionId, connName: session.connName, hasConnId: !!session.connId, hasQuickInfo: !!session.quickConnInfo });
 
-        const overlay = document.querySelector(`#panel-${sessionId} .connecting-overlay`);
-        if (overlay) {
-            overlay.innerHTML = `
+        session._isReconnecting = true;
+
+        // 🔧 修复：立即更新 connecting-overlay 显示"重新连接中"，提供视觉反馈
+        const connectingOverlay = document.querySelector(`#panel-${sessionId} .connecting-overlay`);
+        if (connectingOverlay) {
+            connectingOverlay.innerHTML = `
                 <div class="connecting-spinner"></div>
                 <p>正在重新连接到 ${this.escapeHtml(session.connName)}...</p>`;
         }
 
-        this.showGlobalProgress(true);
+        this._showReconnectingOverlay(sessionId);
+
+        if (this._termBuffers && this._termBuffers[sessionId]) {
+            delete this._termBuffers[sessionId];
+        }
+        if (typeof terminalManager !== 'undefined') {
+            terminalManager.unbindDataHandler(sessionId);
+        }
+
         this.socket.emit('close_terminal', { session_id: sessionId });
-        if (typeof terminalManager !== 'undefined') terminalManager.destroy(sessionId);
-        // 🔧 清理断开连接遮罩（如果有）
-        document.getElementById(`terminal-${sessionId}`)?.querySelector('.terminal-disconnected-mask')?.remove();
+
+        const connInfo = session.connId ?
+            { connId: session.connId } :
+            { quickConnInfo: session.quickConnInfo };
+        this.sessions[sessionId] = {
+            ...connInfo,
+            connName: session.connName,
+            color: session.color,
+            _isReconnecting: true,
+        };
 
         const termContainer = document.getElementById(`terminal-${sessionId}`);
         if (termContainer && typeof terminalManager !== 'undefined') {
-            const term = terminalManager.create(sessionId, termContainer);
-            // 🔧 Ctrl+C 选中复制 / Ctrl+V 粘贴
-            term.attachCustomKeyEventHandler((e) => {
-                if (e.ctrlKey && !e.shiftKey && e.key === 'c' && term.hasSelection()) {
-                    // 防抖：300ms 内不重复处理（修复 xterm keydown+keypress 双事件触发）
+            const newTerm = terminalManager.recreate(sessionId, termContainer);
+
+            newTerm.attachCustomKeyEventHandler((e) => {
+                if (e.ctrlKey && !e.shiftKey && e.key === 'c' && newTerm.hasSelection()) {
                     const now = Date.now();
                     if (this._lastCtrlC && now - this._lastCtrlC < 300) return false;
                     this._lastCtrlC = now;
-                    const sel = term.getSelection();
+                    const sel = newTerm.getSelection();
                     if (sel) {
                         navigator.clipboard.writeText(sel).then(() => {
                             this.toast('已复制', 'success');
@@ -1589,11 +1641,11 @@ const App = {
                 }
                 return true;
             });
-            // 🔧 右键菜单
-            term.element?.addEventListener('contextmenu', (e) => {
-                if (term.hasSelection()) {
+
+            newTerm.element?.addEventListener('contextmenu', (e) => {
+                if (newTerm.hasSelection()) {
                     e.preventDefault();
-                    const sel = term.getSelection();
+                    const sel = newTerm.getSelection();
                     if (sel) {
                         navigator.clipboard.writeText(sel).then(() => {
                             this.toast('已复制', 'success');
@@ -1609,86 +1661,19 @@ const App = {
                     }).catch(() => {});
                 }
             });
-            // 🔧 高危命令实时监测：逐字符缓冲，回车前调用后端 API 分析风险
+
             if (!this._termBuffers) this._termBuffers = {};
             this._termBuffers[sessionId] = '';
 
-            term.onData(data => {
-                const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
-                const _buf = (add) => { this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + add; };
-                const _pop = () => { const b = this._termBuffers[sessionId] || ''; this._termBuffers[sessionId] = b.slice(0, -1); };
+            const dataHandler = this._createDataHandler(sessionId);
+            terminalManager.bindDataHandler(sessionId, dataHandler);
 
-                // ── 转义序列（箭头键等）：直通不缓冲 ──
-                if (cleaned.charCodeAt(0) === 0x1b) {
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-                    return;
-                }
-
-                // ── 批量输入含 Enter ──
-                const enterIdx = cleaned.lastIndexOf('\r');
-                if (enterIdx >= 0) {
-                    const before = cleaned.substring(0, enterIdx);
-                    const after = cleaned.substring(enterIdx + 1);
-
-                    for (let i = 0; i < before.length; i++) {
-                        const ch = before[i], code = ch.charCodeAt(0);
-                        if (ch === '\x7f' || ch === '\b') _pop();
-                        else if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                    }
-
-                    let cmd = (this._termBuffers[sessionId] || '').trim();
-                    this._termBuffers[sessionId] = '';
-
-                    // 🔧 修复：箭头键历史导航不会键入字符，缓冲区可能为空
-                    // 尝试从 xterm 可视缓冲区读取当前行（含 prompt 前缀，但正则仍能匹配）
-                    if (!cmd && term.buffer) {
-                        try {
-                            const buf = term.buffer.active;
-                            const line = buf.getLine(buf.baseY + buf.cursorY);
-                            if (line) {
-                                const visualCmd = line.translateToString(true).trim();
-                                if (visualCmd) cmd = visualCmd;
-                            }
-                        } catch(e) {}
-                    }
-
-                    if (this._checkDangerousCmd(sessionId, cmd)) {
-                        for (let i = 0; i < after.length; i++) {
-                            const ch = after[i], code = ch.charCodeAt(0);
-                            if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                        }
-                        return;
-                    }
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: before + '\r' + after });
-                    return;
-                }
-
-                // ── Ctrl+C：清空缓冲区 ──
-                if (cleaned === '\x03') {
-                    this._termBuffers[sessionId] = '';
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
-                    return;
-                }
-
-                // ── 退格键 ──
-                if (cleaned === '\x7f' || cleaned === '\b') {
-                    _pop();
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-                    return;
-                }
-
-                // ── 可打印字符（含批量无 Enter）──
-                for (let i = 0; i < cleaned.length; i++) {
-                    const ch = cleaned[i], code = ch.charCodeAt(0);
-                    if (ch === '\x7f' || ch === '\b') _pop();
-                    else if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                }
-                this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-            });
-            term.onResize(s => {
-                this.socket.emit('terminal_resize', { session_id: sessionId, ...s });
+            newTerm.onResize(s => {
+                this.socket.emit('terminal_resize', { session_id: sessionId, cols: s.cols, rows: s.rows });
             });
         }
+
+        this.showGlobalProgress(true);
 
         if (session.connId) {
             this.socket.emit('open_terminal', { conn_id: session.connId, session_id: sessionId });
@@ -1705,16 +1690,143 @@ const App = {
             });
         } else {
             this.hideGlobalProgress();
-            if (overlay) {
-                overlay.innerHTML = `
-                    <i class="fas fa-info-circle"
-                       style="font-size:48px;color:var(--accent-color);margin-bottom:16px"></i>
-                    <p>无法自动重试，请关闭后重新连接</p>
-                    <button class="btn" onclick="App.closeSession('${sessionId}')"
-                            style="margin-top:16px">
-                        <i class="fas fa-times"></i> 关闭
-                    </button>`;
+            this._hideReconnectingOverlay(sessionId);
+            this.toast('无法恢复会话，请重新打开连接。', 'error');
+            return;
+        }
+
+        const onConnected = () => {
+            if (this.sessions[sessionId]) {
+                this.sessions[sessionId]._isReconnecting = false;
             }
+            this._hideReconnectingOverlay(sessionId);
+            this.socket.off('terminal_connected', onConnected);
+        };
+        this.socket.once('terminal_connected', onConnected);
+
+        const onError = (payload) => {
+            if (payload.session_id === sessionId) {
+                if (this.sessions[sessionId]) {
+                    this.sessions[sessionId]._isReconnecting = false;
+                }
+                this._hideReconnectingOverlay(sessionId);
+                this.socket.off('terminal_error', onError);
+            }
+        };
+        this.socket.on('terminal_error', onError);
+
+        const sessionCleanup = this.sessions[sessionId];
+        if (sessionCleanup) {
+            sessionCleanup._retryCleanup = () => {
+                this.socket.off('terminal_connected', onConnected);
+                this.socket.off('terminal_error', onError);
+            };
+        }
+    },
+
+    _createDataHandler(sessionId) {
+        return (data) => {
+            const session = this.sessions[sessionId];
+            if (!session || session._isReconnecting) {
+                console.warn(`[Terminal] 输入被忽略，会话 ${sessionId} 正在重连或已关闭。`);
+                return;
+            }
+
+            const termObj = typeof terminalManager !== 'undefined' ? terminalManager.get(sessionId) : null;
+            const term = termObj ? termObj.term : null;
+
+            const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+            const _buf = (add) => { this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + add; };
+            const _pop = () => { const b = this._termBuffers[sessionId] || ''; this._termBuffers[sessionId] = b.slice(0, -1); };
+
+            if (cleaned.charCodeAt(0) === 0x1b) {
+                this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
+                return;
+            }
+
+            const enterIdx = cleaned.lastIndexOf('\r');
+            if (enterIdx >= 0) {
+                const before = cleaned.substring(0, enterIdx);
+                const after = cleaned.substring(enterIdx + 1);
+
+                for (let i = 0; i < before.length; i++) {
+                    const ch = before[i], code = ch.charCodeAt(0);
+                    if (ch === '\x7f' || ch === '\b') _pop();
+                    else if (code >= 0x20 && code <= 0x7E) _buf(ch);
+                }
+
+                let cmd = (this._termBuffers[sessionId] || '').trim();
+                this._termBuffers[sessionId] = '';
+
+                if (!cmd && term && term.buffer) {
+                    try {
+                        const buf = term.buffer.active;
+                        const line = buf.getLine(buf.baseY + buf.cursorY);
+                        if (line) {
+                            const visualCmd = line.translateToString(true).trim();
+                            if (visualCmd) cmd = visualCmd;
+                        }
+                    } catch(e) {}
+                }
+
+                if (this._checkDangerousCmd(sessionId, cmd)) {
+                    for (let i = 0; i < after.length; i++) {
+                        const ch = after[i], code = ch.charCodeAt(0);
+                        if (code >= 0x20 && code <= 0x7E) _buf(ch);
+                    }
+                    return;
+                }
+                this.socket.emit('terminal_input', { session_id: sessionId, data: before + '\r' + after });
+                return;
+            }
+
+            if (cleaned === '\x03') {
+                this._termBuffers[sessionId] = '';
+                this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
+                return;
+            }
+
+            if (cleaned === '\x7f' || cleaned === '\b') {
+                _pop();
+                this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
+                return;
+            }
+
+            for (let i = 0; i < cleaned.length; i++) {
+                const ch = cleaned[i], code = ch.charCodeAt(0);
+                if (ch === '\x7f' || ch === '\b') _pop();
+                else if (code >= 0x20 && code <= 0x7E) _buf(ch);
+            }
+            this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
+        };
+    },
+
+    _showReconnectingOverlay(sessionId) {
+        const termDiv = document.getElementById(`terminal-${sessionId}`);
+        if (!termDiv) return;
+        let mask = termDiv.querySelector('.reconnecting-overlay');
+        if (!mask) {
+            mask = document.createElement('div');
+            mask.className = 'reconnecting-overlay';
+            mask.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+                'background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;' +
+                'z-index:15;border-radius:8px;';
+            mask.innerHTML = `
+                <div style="text-align:center;color:#fff;">
+                    <i class="fas fa-wifi" style="font-size:36px;display:block;margin-bottom:12px;opacity:0.7;"></i>
+                    <p style="font-size:14px;margin:0 0 4px;font-weight:600;">正在重新连接...</p>
+                    <p style="font-size:12px;opacity:0.6;margin:0;">请稍候，连接恢复中</p>
+                </div>`;
+            termDiv.style.position = termDiv.style.position || 'relative';
+            termDiv.appendChild(mask);
+        }
+    },
+
+    _hideReconnectingOverlay(sessionId) {
+        const termDiv = document.getElementById(`terminal-${sessionId}`);
+        if (termDiv) {
+            const mask = termDiv.querySelector('.reconnecting-overlay');
+            if (mask) mask.remove();
         }
     },
 
@@ -1929,6 +2041,10 @@ const App = {
         // 🔧 清理终端输入缓冲区
         if (this._termBuffers && this._termBuffers[sessionId]) {
             delete this._termBuffers[sessionId];
+        }
+        // 🔧 清理重连监听器
+        if (this.sessions[sessionId] && this.sessions[sessionId]._retryCleanup) {
+            this.sessions[sessionId]._retryCleanup();
         }
 
         // 如果是分屏主屏，先关闭分屏
@@ -4416,7 +4532,6 @@ const App = {
             // 🔧 Ctrl+C 选中复制 / Ctrl+V 粘贴（不再依赖后端 SIGINT 处理复制场景）
             term.attachCustomKeyEventHandler((e) => {
                 if (e.ctrlKey && !e.shiftKey && e.key === 'c' && term.hasSelection()) {
-                    // 防抖：300ms 内不重复处理（修复 xterm keydown+keypress 双事件触发）
                     const now = Date.now();
                     if (this._lastCtrlC && now - this._lastCtrlC < 300) return false;
                     this._lastCtrlC = now;
@@ -4428,7 +4543,7 @@ const App = {
                             this.toast('复制失败，请用工具栏按钮', 'warning');
                         });
                     }
-                    return false; // 阻止事件传递到终端，不发 SIGINT
+                    return false;
                 }
                 if (e.ctrlKey && !e.shiftKey && e.key === 'v') {
                     navigator.clipboard.readText().then(text => {
@@ -4438,7 +4553,7 @@ const App = {
                     }).catch(() => {});
                     return false;
                 }
-                return true; // 其他按键正常传递
+                return true;
             });
             // 🔧 终端右键菜单：有选中文本时复制，无选中时粘贴
             term.element?.addEventListener('contextmenu', (e) => {
@@ -4460,85 +4575,14 @@ const App = {
                     }).catch(() => {});
                 }
             });
-            // 🔧 高危命令实时监测：逐字符缓冲，回车前调用后端 API 分析风险
+            // 🔧 初始化命令缓冲区
             if (!this._termBuffers) this._termBuffers = {};
             this._termBuffers[sessionId] = '';
 
-            term.onData(data => {
-                const cleaned = data.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
-                const _buf = (add) => { this._termBuffers[sessionId] = (this._termBuffers[sessionId] || '') + add; };
-                const _pop = () => { const b = this._termBuffers[sessionId] || ''; this._termBuffers[sessionId] = b.slice(0, -1); };
+            // 使用独立的数据处理器
+            const dataHandler = this._createDataHandler(sessionId);
+            terminalManager.bindDataHandler(sessionId, dataHandler);
 
-                // ── 转义序列（箭头键等）：直通不缓冲 ──
-                if (cleaned.charCodeAt(0) === 0x1b) {
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-                    return;
-                }
-
-                // ── 批量输入含 Enter ──
-                const enterIdx = cleaned.lastIndexOf('\r');
-                if (enterIdx >= 0) {
-                    const before = cleaned.substring(0, enterIdx);
-                    const after = cleaned.substring(enterIdx + 1);
-
-                    // 缓冲 \r 前的可打印字符/退格
-                    for (let i = 0; i < before.length; i++) {
-                        const ch = before[i], code = ch.charCodeAt(0);
-                        if (ch === '\x7f' || ch === '\b') _pop();
-                        else if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                    }
-
-                    let cmd = (this._termBuffers[sessionId] || '').trim();
-                    this._termBuffers[sessionId] = '';
-
-                    // 🔧 修复：箭头键历史导航不会键入字符，缓冲区可能为空
-                    // 尝试从 xterm 可视缓冲区读取当前行（含 prompt 前缀，但正则仍能匹配）
-                    if (!cmd && term.buffer) {
-                        try {
-                            const buf = term.buffer.active;
-                            const line = buf.getLine(buf.baseY + buf.cursorY);
-                            if (line) {
-                                const visualCmd = line.translateToString(true).trim();
-                                if (visualCmd) cmd = visualCmd;
-                            }
-                        } catch(e) {}
-                    }
-
-
-                    if (this._checkDangerousCmd(sessionId, cmd)) {
-                        // 拦截：缓冲 after 中的可打印字符（用户可能在等 toast 时又打了字）
-                        for (let i = 0; i < after.length; i++) {
-                            const ch = after[i], code = ch.charCodeAt(0);
-                            if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                        }
-                        return;
-                    }
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: before + '\r' + after });
-                    return;
-                }
-
-                // ── Ctrl+C：清空缓冲区 ──
-                if (cleaned === '\x03') {
-                    this._termBuffers[sessionId] = '';
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: '\x03' });
-                    return;
-                }
-
-                // ── 退格键 ──
-                if (cleaned === '\x7f' || cleaned === '\b') {
-                    _pop();
-                    this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-                    return;
-                }
-
-                // ── 可打印字符（含批量无 Enter）──
-                for (let i = 0; i < cleaned.length; i++) {
-                    const ch = cleaned[i], code = ch.charCodeAt(0);
-                    if (ch === '\x7f' || ch === '\b') _pop();
-                    else if (code >= 0x20 && code <= 0x7E) _buf(ch);
-                }
-                this.socket.emit('terminal_input', { session_id: sessionId, data: cleaned });
-            });
             term.onResize(s => {
                 this.socket.emit('terminal_resize', { session_id: sessionId, cols: s.cols, rows: s.rows });
             });

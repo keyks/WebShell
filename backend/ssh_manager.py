@@ -856,6 +856,7 @@ class SSHManager:
     def __init__(self):
         self.sessions: dict[str, SSHSession] = {}
         self.lock = threading.Lock()
+        self._session_versions: dict[str, int] = {}
 
     def create_session(
         self, session_id: str, conn_info: dict, conn_name: str = ''
@@ -875,8 +876,13 @@ class SSHManager:
                 if old:
                     log.info(f'[SSHManager] 替换旧会话: {session_id}')
                     old.disconnect()
+                session._version = self._session_versions.get(session_id, 0) + 1
+                self._session_versions[session_id] = session._version
                 self.sessions[session_id] = session
         return success, msg
+
+    def get_session_version(self, session_id: str) -> int:
+        return self._session_versions.get(session_id, 0)
 
     def get_session(self, session_id: str) -> SSHSession | None:
         return self.sessions.get(session_id)
@@ -886,6 +892,8 @@ class SSHManager:
             s = self.sessions.pop(session_id, None)
             if s:
                 s.disconnect()
+            # 🔧 不删除版本号，确保 read_loop 的版本检查在会话重建后仍然有效
+            # 版本号单调递增，旧 read_loop 的 expected_version 与新 session 的 _version 不会相等
 
     def get_active_sessions(self) -> list[str]:
         return list(self.sessions.keys())
@@ -903,6 +911,7 @@ class SSHManager:
                 if session.is_idle_timeout():
                     to_disconnect.append((sid, session))
                     del self.sessions[sid]
+                    # 🔧 不删除版本号，保持版本单调递增
                     cleaned.append(sid)
         # 🔧 修复：在锁外执行 I/O 操作（disconnect 会保存录制文件）
         for sid, session in to_disconnect:

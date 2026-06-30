@@ -69,11 +69,24 @@ class Monitor {
             const res  = await fetch(`/api/monitor/${sessionId}`, {
                 headers: App.authHeaders()
             });
+            // 🔧 会话已不存在（404），停止轮询避免无限请求
+            if (res.status === 404) {
+                console.warn(`[Monitor] 会话 ${sessionId} 已不存在，停止监控轮询`);
+                this.stop(sessionId);
+                delete this.historyData[sessionId];
+                return;
+            }
             const data = await res.json();
             if (data.status === 'ok') {
                 this.updateUI(sessionId, data.data);
             }
         } catch (e) {
+            // 🔧 fetch 失败（网络错误/服务器不可达），单次静默跳过但不清除数据
+            // 服务器恢复后轮询会自动恢复
+            if (e.name === 'TypeError' && e.message === 'Failed to fetch') {
+                // 网络不可达，不打印日志（避免刷屏）
+                return;
+            }
             console.error('[Monitor] 获取数据失败:', e);
         }
     }

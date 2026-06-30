@@ -1786,14 +1786,15 @@ def on_disconnect():
     else:
         log.debug(f'[WS] 未认证连接断开: {sid}')
 
-    # 🔧 清理该客户端的所有 SSH 会话，防止资源泄漏
+    # 🔧 清理客户端-会话映射，但不立即销毁 SSH 会话
+    # 原因：瞬断（transport close）很常见，销毁会话会导致重连后终端不可用。
+    # SSH 会话会由以下机制自然回收：
+    #   1. 空闲超时（cleanup_idle_sessions）
+    #   2. SSH TCP keepalive 检测断连
+    #   3. read_loop 健康检查
     session_ids = _ws_sessions.pop(sid, set())
     for s_id in session_ids:
-        try:
-            ssh_manager.remove_session(s_id)
-            log.info(f'[WS] 断连清理 SSH 会话: {s_id} (客户端 {sid})')
-        except Exception as e:
-            log.error(f'[WS] 清理会话失败 {s_id}: {e}')
+        log.info(f'[WS] 客户端断开，SSH 会话保留（等待重连）: {s_id}')
 
 
 def _ws_require_auth(fn):
@@ -1813,75 +1814,88 @@ def _ws_require_auth(fn):
     return wrapper
 
 
+def _safe_emit(event, data, **kwargs):
+    """🔧 安全 emit：捕获 emit 异常防止传输层崩溃"""
+    try:
+        socketio.emit(event, data, **kwargs)
+    except Exception as e:
+        log.debug(f'[safe_emit] {event} 发送失败（客户端可能已断开）: {e}')
+
+
 def _start_read_loop(client_sid: str, session_id: str):
     """
     🔧 修复：读取循环异常时通知前端
+    🔧 新增：版本号检查，确保旧循环在会话重建后优雅退出
     """
     def _loop(sid, s_id):
         consecutive_errors = 0
         _last_health_check = time.time()
-        while True:
-            session = ssh_manager.get_session(s_id)
-            if not session:
-                log.info(f'[read_loop] 会话不存在，退出: {s_id}')
-                break
-            if not session.connected:
-                log.info(f'[read_loop] 会话已断开，退出: {s_id}')
-                # 🔧 通知前端连接已断开
-                socketio.emit(
-                    'terminal_closed',
-                    {'session_id': s_id, 'reason': 'SSH连接已断开'},
-                    room=sid
-                )
-                break
-            if session.should_stop():
-                break
-
-            # 🔧 SSH 传输层活性检测：每 30 秒检查一次 transport 是否仍然活跃
-            now = time.time()
-            if now - _last_health_check > 30:
-                _last_health_check = now
-                try:
-                    if session.client:
-                        transport = session.client.get_transport()
-                        if transport and not transport.is_active():
-                            log.warning(
-                                f'[read_loop] SSH transport 不活跃，标记断开: {s_id}'
-                            )
-                            session.connected = False
-                            socketio.emit(
-                                'terminal_closed',
-                                {'session_id': s_id,
-                                 'reason': 'SSH 连接已断开（传输层超时）'},
-                                room=sid
-                            )
-                            break
-                except Exception as health_err:
-                    log.debug(f'[read_loop] 健康检查异常: {health_err}')
-
-            try:
-                out = session.read_output()
-                if out:
-                    socketio.emit(
-                        'terminal_output',
-                        {'data': out, 'session_id': s_id},
-                        room=sid
-                    )
-                    consecutive_errors = 0  # 重置错误计数
-                socketio.sleep(0.02)
-            except Exception as e:
-                consecutive_errors += 1
-                log.debug(f'[read_loop] 错误({consecutive_errors}): {e}')
-                # 🔧 连续错误超过阈值才退出，避免偶发错误断开
-                if consecutive_errors >= 5:
-                    log.warning(f'[read_loop] 连续错误过多，退出: {s_id}')
-                    socketio.emit(
-                        'terminal_error',
-                        {'message': f'终端读取失败: {e}', 'session_id': s_id},
-                        room=sid
-                    )
+        expected_version = ssh_manager.get_session_version(s_id)
+        log.info(f'[read_loop] 启动，session={s_id}, version={expected_version}')
+        # 🔧 顶层异常保护：防止后台任务抛出未捕获异常导致传输层崩溃
+        try:
+            while True:
+                session = ssh_manager.get_session(s_id)
+                if not session:
+                    log.info(f'[read_loop] 会话不存在，退出: {s_id}')
                     break
-                socketio.sleep(0.5)
+                if not session.connected:
+                    log.info(f'[read_loop] 会话已断开，退出: {s_id}')
+                    _safe_emit('terminal_closed',
+                              {'session_id': s_id, 'reason': 'SSH连接已断开'},
+                              room=sid)
+                    break
+                if session.should_stop():
+                    break
+                if hasattr(session, '_version') and session._version != expected_version:
+                    log.info(f'[read_loop] 会话已被重建，旧 loop 退出: {s_id}, '
+                             f'expected={expected_version}, actual={session._version}')
+                    break
+
+                # 🔧 SSH 传输层活性检测：每 30 秒检查一次 transport 是否仍然活跃
+                now = time.time()
+                if now - _last_health_check > 30:
+                    _last_health_check = now
+                    try:
+                        if session.client:
+                            transport = session.client.get_transport()
+                            if transport and not transport.is_active():
+                                log.warning(
+                                    f'[read_loop] SSH transport 不活跃，标记断开: {s_id}'
+                                )
+                                session.connected = False
+                                _safe_emit('terminal_closed',
+                                          {'session_id': s_id,
+                                           'reason': 'SSH 连接已断开（传输层超时）'},
+                                          room=sid)
+                                break
+                    except Exception as health_err:
+                        log.debug(f'[read_loop] 健康检查异常: {health_err}')
+
+                try:
+                    out = session.read_output()
+                    if out:
+                        _safe_emit('terminal_output',
+                                  {'data': out, 'session_id': s_id},
+                                  room=sid)
+                        consecutive_errors = 0  # 重置错误计数
+                    socketio.sleep(0.02)
+                except Exception as e:
+                    consecutive_errors += 1
+                    log.debug(f'[read_loop] 错误({consecutive_errors}): {e}')
+                    # 🔧 连续错误超过阈值才退出，避免偶发错误断开
+                    if consecutive_errors >= 5:
+                        log.warning(f'[read_loop] 连续错误过多，退出: {s_id}')
+                        _safe_emit('terminal_error',
+                                  {'message': f'终端读取失败: {e}', 'session_id': s_id},
+                                  room=sid)
+                        break
+                    socketio.sleep(0.5)
+        except Exception as fatal_err:
+            log.error(f'[read_loop] 未捕获异常，后台任务安全退出: {s_id}, {fatal_err}', exc_info=True)
+            _safe_emit('terminal_error',
+                      {'message': f'终端会话异常退出，请重连', 'session_id': s_id},
+                      room=sid)
 
         log.info(f'[read_loop] 已退出: {s_id}')
 
@@ -1901,6 +1915,15 @@ def on_open_terminal(data):
 
     log.info(f'[OpenTerminal] ═══ 打开终端请求 ═══')
     log.info(f'[OpenTerminal] 客户端={client_sid}, session={session_id}, conn_id={conn_id}')
+
+    # 🔧 断线重连：检查会话是否已经存在（服务器未重启时的瞬断恢复）
+    existing = ssh_manager.get_session(session_id)
+    if existing and existing.connected:
+        log.info(f'[OpenTerminal] 会话已存在，复用并重新绑定 read_loop: {session_id}')
+        _ws_sessions.setdefault(client_sid, set()).add(session_id)
+        emit('terminal_connected', {'session_id': session_id})
+        _start_read_loop(client_sid, session_id)
+        return
 
     conn_info = db.get_connection(conn_id)
     if not conn_info:
@@ -1932,7 +1955,7 @@ def on_open_terminal(data):
                  target=conn_info.get('host', ''), ip=_get_real_ip())
     emit('terminal_connected', {'session_id': session_id})
     _start_read_loop(client_sid, session_id)
-    # 🔧 注册客户端-会话映射，用于断连时清理
+    # 🔧 注册客户端-会话映射，用于断连后追踪
     _ws_sessions.setdefault(client_sid, set()).add(session_id)
 
 
@@ -1942,6 +1965,15 @@ def on_quick_connect(data):
     client_sid = request.sid
     session_id = data.get('session_id', client_sid)
     save_history = data.get('save_history', True)
+
+    # 🔧 断线重连：检查会话是否已经存在（服务器未重启时的瞬断恢复）
+    existing = ssh_manager.get_session(session_id)
+    if existing and existing.connected:
+        log.info(f'[QuickConnect] 会话已存在，复用并重新绑定 read_loop: {session_id}')
+        _ws_sessions.setdefault(client_sid, set()).add(session_id)
+        emit('terminal_connected', {'session_id': session_id})
+        _start_read_loop(client_sid, session_id)
+        return
 
     conn_info = {
         'host': data.get('host', '').strip(),
@@ -1983,6 +2015,9 @@ def on_quick_connect(data):
     _start_read_loop(client_sid, session_id)
     # 🔧 注册客户端-会话映射，用于断连时清理
     _ws_sessions.setdefault(client_sid, set()).add(session_id)
+
+
+@socketio.on('terminal_input')
 @_ws_require_auth
 def on_terminal_input(data):
     raw_data = data.get('data', '')                # 保留原始数据（含 \r），用于发送到 PTY

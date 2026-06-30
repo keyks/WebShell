@@ -105,6 +105,31 @@ class TerminalManager {
         if (t) t.term.focus();
     }
 
+    bindDataHandler(sessionId, dataHandler) {
+        const termObj = this.terminals[sessionId];
+        if (!termObj) return;
+
+        if (termObj._dataHandler) {
+            termObj.term.offData(termObj._dataHandler);
+        }
+
+        termObj._dataHandler = dataHandler;
+        termObj.term.onData(dataHandler);
+    }
+
+    unbindDataHandler(sessionId) {
+        const termObj = this.terminals[sessionId];
+        if (termObj && termObj._dataHandler) {
+            termObj.term.offData(termObj._dataHandler);
+            delete termObj._dataHandler;
+        }
+    }
+
+    recreate(sessionId, container) {
+        this.destroy(sessionId);
+        return this.create(sessionId, container);
+    }
+
     updateTheme(isDark) {
         Object.values(this.terminals).forEach(({ term }) => {
             term.options.theme = isDark ? this._darkTheme() : this._lightTheme();
